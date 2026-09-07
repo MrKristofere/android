@@ -160,7 +160,7 @@ public class BillingController implements PurchasesUpdatedListener, BillingClien
             return;
         }
         billingClientEmpty = true;
-        NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.billingProductDetailsUpdated);
+        NotificationCenter.getGlobalInstance().postNotificationNameOnUIThread(NotificationCenter.billingProductDetailsUpdated);
     }
 
     private void switchBackFromInvoice() {
@@ -168,31 +168,23 @@ public class BillingController implements PurchasesUpdatedListener, BillingClien
             return;
         }
         billingClientEmpty = false;
-        NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.billingProductDetailsUpdated);
+        NotificationCenter.getGlobalInstance().postNotificationNameOnUIThread(NotificationCenter.billingProductDetailsUpdated);
     }
 
     public boolean isReady() {
         return billingClient.isReady();
     }
 
-    /**
-     * Billing 8.0.0 changed {@code ProductDetailsResponseListener} to hand back a
-     * {@code QueryProductDetailsResult} instead of a plain {@code List<ProductDetails>}. We keep the
-     * old list-based callback shape here so none of the ~13 call sites (Premium/Stars/Gifts) have to
-     * change; the v8 result is unwrapped to its fetched product list right here.
-     */
-    public interface ProductDetailsListener {
-        void onProductDetails(BillingResult billingResult, List<ProductDetails> productDetails);
+    public interface ProductDetailsResponseListenerLegacy {
+        void onProductDetailsResponse(BillingResult billingResult, List<ProductDetails> list);
     }
 
-    public void queryProductDetails(List<QueryProductDetailsParams.Product> products, ProductDetailsListener responseListener) {
+    public void queryProductDetails(List<QueryProductDetailsParams.Product> products, ProductDetailsResponseListenerLegacy responseListener) {
         if (!isReady()) {
             throw new IllegalStateException("Billing: Controller should be ready for this call!");
         }
-        billingClient.queryProductDetailsAsync(
-                QueryProductDetailsParams.newBuilder().setProductList(products).build(),
-                (billingResult, result) -> responseListener.onProductDetails(billingResult, result.getProductDetailsList())
-        );
+        billingClient.queryProductDetailsAsync(QueryProductDetailsParams.newBuilder().setProductList(products).build(), (billingResult, queryProductDetailsResult) ->
+            responseListener.onProductDetailsResponse(billingResult, queryProductDetailsResult.getProductDetailsList()));
     }
 
     /**

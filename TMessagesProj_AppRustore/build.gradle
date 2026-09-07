@@ -24,7 +24,7 @@ dependencies {
 
 android {
     compileSdkVersion 36
-    buildToolsVersion '35.0.0'
+    buildToolsVersion '36.0.0'
 
     defaultConfig.applicationId = "org.messenger_pro.messenger"
 
@@ -123,7 +123,7 @@ android {
         minSdkVersion 21
         targetSdkVersion 36
         versionName getRustoreVersionName()
-        ndkVersion "21.4.7075529"
+        ndkVersion "27.2.12479018"
 
         multiDexEnabled true
 
@@ -131,7 +131,7 @@ android {
 
         externalNativeBuild {
             cmake {
-                version '3.10.2'
+                version '3.22.1'
                 arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21'
             }
         }

@@ -1118,7 +1118,8 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
         public void updateColors() {
             textView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider));
             counterView.setBackground(Theme.createRoundRectDrawable(dp(10), Theme.getColor(Theme.key_featuredStickers_addButton, resourcesProvider)));
-            arrowView.setColorFilter(new PorterDuffColorFilter(Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon, resourcesProvider), PorterDuff.Mode.SRC_IN));
+            // Novagram: upstream tints an arrowView here; this row ends in our per-account
+            // notification Switch instead, and the Switch carries its own theme colors.
             emojiStatusDrawable.setColor(Theme.getColor(Theme.key_profile_verifiedBackground, resourcesProvider));
         }
 

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.google.zxing.qrcode;
+package org.telegram.messenger;
 
 import static org.telegram.messenger.AndroidUtilities.readRes;
 
@@ -35,11 +35,6 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel;
 import com.google.zxing.qrcode.encoder.Encoder;
 import com.google.zxing.qrcode.encoder.QRCode;
 
-import org.telegram.messenger.AndroidUtilities;
-import org.telegram.messenger.ApplicationLoader;
-import org.telegram.messenger.R;
-import org.telegram.messenger.SvgHelper;
-
 import java.util.Arrays;
 import java.util.Map;
 
@@ -48,7 +43,7 @@ import java.util.Map;
  *
  * @author dswitkin@google.com (Daniel Switkin)
  */
-public final class QRCodeWriter {
+public final class TelegramQRCodeWriter {
 
   private static final int QUIET_ZONE_SIZE = 4;
   private ByteMatrix input;
@@ -190,6 +185,9 @@ public final class QRCodeWriter {
       }
     }
 
+    // Novagram: our own logo in the middle of the QR. Upstream's is an SVG raw resource; ours is a
+    // plain drawable, so it is decoded and scaled to the block-aligned imageSize instead. Recycle the
+    // source only when a scaled copy was actually made, or the copy would be recycled twice.
     Bitmap iconSrc = BitmapFactory.decodeResource(ApplicationLoader.applicationContext.getResources(), R.drawable.qr_logo_novagram);
     Bitmap icon = (iconSrc.getWidth() == imageSize && iconSrc.getHeight() == imageSize) ? iconSrc : Bitmap.createScaledBitmap(iconSrc, imageSize, imageSize, true);
     canvas.drawBitmap(icon, imageX, imageX, null);

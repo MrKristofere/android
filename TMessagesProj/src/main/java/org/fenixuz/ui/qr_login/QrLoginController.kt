@@ -10,7 +10,10 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.google.zxing.EncodeHintType
-import com.google.zxing.qrcode.QRCodeWriter
+// Telegram's own QR writer -- the one that renders straight to a Bitmap with the rounded
+// blocks and the logo hole. In 12.10 it moved out of the zxing package (com.google.zxing.qrcode
+// .QRCodeWriter now resolves to the real zxing class, whose encode() returns a BitMatrix).
+import org.telegram.messenger.TelegramQRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import org.fenixuz.utils.LanguageCode
 import org.telegram.messenger.AndroidUtilities
@@ -215,7 +218,7 @@ class QrLoginController(
             val hints = HashMap<EncodeHintType, Any>()
             hints[EncodeHintType.ERROR_CORRECTION] = ErrorCorrectionLevel.M
             hints[EncodeHintType.MARGIN] = 0
-            QRCodeWriter().encode(text, QR_PX, QR_PX, hints, null)
+            TelegramQRCodeWriter().encode(text, QR_PX, QR_PX, hints, null)
         } catch (e: Exception) {
             FileLog.e(e)
             null

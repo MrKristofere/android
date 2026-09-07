@@ -1,14 +1,7 @@
 /*
- * General DV muxer/demuxer
- * Copyright (c) 2003 Roman Shaposhnik
- *
- * Many thanks to Dan Dennedy <dan@dennedy.org> for providing wealth
- * of DV technical info.
- *
- * Raw DV format
- * Copyright (c) 2002 Fabrice Bellard
- *
  * This file is part of FFmpeg.
+ *
+ * Copyright (c) 2025 Zhao Zhili <quinkblack@foxmail.com>
  *
  * FFmpeg is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -25,17 +18,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVFORMAT_DV_H
-#define AVFORMAT_DV_H
+#ifndef AVUTIL_HWCONTEXT_OH_H
+#define AVUTIL_HWCONTEXT_OH_H
 
-#include "avformat.h"
+/**
+ * OpenHarmony codec device
+ */
+typedef struct AVOHCodecDeviceContext {
+    /**
+     * Pointer to OHNativeWindow
+     */
+    void *native_window;
+} AVOHCodecDeviceContext;
 
-typedef struct DVDemuxContext DVDemuxContext;
-DVDemuxContext* avpriv_dv_init_demux(AVFormatContext* s);
-int avpriv_dv_get_packet(DVDemuxContext*, AVPacket *);
-int avpriv_dv_produce_packet(DVDemuxContext*, AVPacket*, uint8_t*, int, int64_t);
-void ff_dv_offset_reset(DVDemuxContext *c, int64_t frame_offset);
-
-typedef struct DVMuxContext DVMuxContext;
-
-#endif /* AVFORMAT_DV_H */
+#endif /* AVUTIL_HWCONTEXT_OH_H */

@@ -52,8 +52,6 @@ public class BuildVars {
     // (and fill GOOGLE_AUTH_CLIENT_ID) to try it again; the button follows this flag on its own.
     public static boolean SUPPORTS_GOOGLE_EMAIL_SIGNIN = false;
 
-    public static boolean USE_LEGACY_SYSTEM_INSETS = false;
-
     static {
         if (ApplicationLoader.applicationContext != null) {
             SharedPreferences sharedPreferences = ApplicationLoader.applicationContext.getSharedPreferences("systemConfig", Context.MODE_PRIVATE);

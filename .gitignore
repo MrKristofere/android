@@ -32,3 +32,4 @@ branding/
 
 # Claude / IDE
 .claude/
+TMessagesProj/jni/ffmpeg/build_android

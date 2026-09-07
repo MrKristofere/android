@@ -250,4 +250,7 @@
         <item name="android:textColor">@color/widget_badge</item>
     </style>
 
+    <style name="EditTextNoBackgroundStyle" parent="android:Widget.EditText">
+        <item name="android:background">@null</item>
+    </style>
 </resources>

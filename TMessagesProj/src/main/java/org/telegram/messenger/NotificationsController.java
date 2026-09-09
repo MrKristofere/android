@@ -4838,9 +4838,13 @@ public class NotificationsController extends BaseController implements Notificat
                     mBuilder.addAction(R.drawable.ic_ab_reply, LocaleController.getString(R.string.Reply), PendingIntent.getBroadcast(ApplicationLoader.applicationContext, 2, replyIntent, PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
                 }
             }
-            // Novagram "Protect from strangers": stay silent for a private DM from a non-contact
-            // (chat == null → one-on-one; groups still notify even if a stranger posts in them).
-            if (org.fenixuz.utils.StrangerShield.isEnabled(currentAccount) && chat == null && org.fenixuz.utils.StrangerShield.isStranger(user)) {
+            // Novagram "Protect from strangers": stay silent for a private DM from someone whose chat
+            // belongs in the stranger inbox (chat == null → one-on-one; groups still notify even if a
+            // stranger posts in them). belongsInInbox, not isEnabled && isStranger: this is the last gate
+            // before the notification is actually posted, and asking the narrower question here ignored the
+            // whitelist entirely -- a sender the user had released with "Not a stranger" was still silenced,
+            // with no trace in the log because this returns without dismissing anything.
+            if (chat == null && org.fenixuz.utils.StrangerShield.belongsInInbox(currentAccount, user, dialog_id)) {
                 return;
             }
             showExtraNotifications(mBuilder, detailText, dialog_id, topicId, chatName, vibrationPattern, ledColor, sound, configImportance, isDefault, isInApp, notifyDisabled, chatType);

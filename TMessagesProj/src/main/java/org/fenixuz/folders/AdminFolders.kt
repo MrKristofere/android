@@ -298,11 +298,16 @@ object AdminFolders {
         val now = System.currentTimeMillis()
         if (now - lastSyncAt < SYNC_MIN_INTERVAL_MS) return
 
+        val controller = MessagesController.getInstance(account)
+        // Wait for the folders to come off disk. dialogFiltersById is empty until then, and this runs from
+        // DialogsActivity.onResume() -- i.e. exactly at cold start. Without this guard every folder looks
+        // deleted, the branch below "forgets" all four, and the feature switches itself off on restart.
+        if (!controller.dialogFiltersLoaded) return
+
         val map = kindToFilter(account)
         if (map.isEmpty()) return
         val current = classify(account)
         val snap = snapshot(account)
-        val controller = MessagesController.getInstance(account)
         val perFolder = chatsPerFolderLimit(account)
 
         // An entry is either an update of a folder we already have, or the first folder of a kind the user
@@ -373,7 +378,9 @@ object AdminFolders {
                 val existing = controller.dialogFiltersById.get(map[kind] ?: -1)
                 if (existing == null) {
                     // Deleted by hand or on another device: forget it rather than recreating something the
-                    // user got rid of on purpose.
+                    // user got rid of on purpose. Safe to conclude that only because dialogFiltersLoaded
+                    // was checked before we got here -- a missing filter would otherwise just mean "not
+                    // loaded yet".
                     val m = kindToFilter(account); m.remove(kind); saveKindToFilter(account, m)
                     val sp = snapshot(account); sp[kind] = LinkedHashSet(); saveSnapshot(account, sp)
                     return step()

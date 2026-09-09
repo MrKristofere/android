@@ -2,11 +2,14 @@ package org.fenixuz.folders
 
 import android.content.Context
 import android.content.SharedPreferences
+import org.fenixuz.ui.create_folder_dialog.FolderIcons
 import org.fenixuz.utils.LanguageCode
 import org.telegram.messenger.ApplicationLoader
 import org.telegram.messenger.ChatObject
 import org.telegram.messenger.DialogObject
 import org.telegram.messenger.MessagesController
+import org.telegram.messenger.NotificationCenter
+import org.telegram.messenger.R
 import org.telegram.messenger.UserConfig
 import org.telegram.messenger.support.LongSparseIntArray
 import org.telegram.tgnet.TLRPC
@@ -35,11 +38,11 @@ object AdminFolders {
     private const val KEY_IDS_PREFIX = "admin_folder_ids_"
 
     /** The four buckets, in the order they are created (and therefore shown). */
-    enum class Kind(val titleCode: Int) {
-        GROUP_OWNER(393),
-        GROUP_ADMIN(394),
-        CHANNEL_OWNER(395),
-        CHANNEL_ADMIN(396);
+    enum class Kind(val titleCode: Int, val iconRes: Int) {
+        GROUP_OWNER(393, R.drawable.msg_groups),
+        GROUP_ADMIN(394, R.drawable.msg_folders_groups),
+        CHANNEL_OWNER(395, R.drawable.msg_channel),
+        CHANNEL_ADMIN(396, R.drawable.msg_folders_channels);
 
         val title: String get() = LanguageCode.getMyTitles(titleCode)
     }
@@ -164,6 +167,9 @@ object AdminFolders {
         fun step() {
             val next = queue.removeFirstOrNull()
             if (next == null) {
+                // MessagesController.addFilter() does NOT post this (removeFilter does), so without it the
+                // tabs only appear after DialogsActivity is recreated -- which reads as "nothing happened".
+                NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
                 onDone(Result(newIds.size, filed, truncated, null))
                 return
             }
@@ -172,6 +178,7 @@ object AdminFolders {
             // the ids of the folders already made are persisted as we go, so turning the feature off can
             // still clean them up.
             if (fragment.parentActivity == null) {
+                NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
                 onDone(Result(newIds.size, filed, truncated, null))
                 return
             }
@@ -198,6 +205,9 @@ object AdminFolders {
             newIds.add(filter.id)
             filed += peers.size
             saveIds(account, createdIds(account) + filter.id)
+            // Our folders carry flags = 0 by design, and FolderIcons' flag-based guess only knows the
+            // built-in filter types -- so without an explicit icon all four land on the generic one.
+            FolderIcons.setIconRes(filter.id, kind.iconRes)
 
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
@@ -249,6 +259,7 @@ object AdminFolders {
                 org.telegram.messenger.AndroidUtilities.runOnUIThread {
                     controller.removeFilter(filter)
                     org.telegram.messenger.MessagesStorage.getInstance(account).deleteDialogFilter(filter)
+                    FolderIcons.setIconRes(id, 0)   // 0 is not in ICONS -> clears our override
                     step()
                 }
             }

@@ -302,25 +302,41 @@ object AdminFolders {
         if (map.isEmpty()) return
         val current = classify(account)
         val snap = snapshot(account)
+        val controller = MessagesController.getInstance(account)
+        val perFolder = chatsPerFolderLimit(account)
 
-        // Only kinds with a real change are touched.
-        val work = LinkedHashMap<Kind, Pair<List<Long>, List<Long>>>()
-        for ((kind, filterId) in map) {
-            val nowSet = LinkedHashSet(current[kind] ?: emptyList())
-            val wasSet = snap[kind] ?: LinkedHashSet()
-            val added = nowSet.filter { it !in wasSet }
-            val removed = wasSet.filter { it !in nowSet }
-            if (added.isNotEmpty() || removed.isNotEmpty()) work[kind] = added to removed
+        // An entry is either an update of a folder we already have, or the first folder of a kind the user
+        // has only just acquired: the very first group they are made admin of should not need a manual
+        // Refresh to get a folder, which is what happened before this branch existed.
+        val jobs = ArrayList<Triple<Kind, List<Long>, List<Long>>>()   // kind, added, removed
+        val fresh = ArrayList<Kind>()
+        for (kind in Kind.entries) {
+            val nowList = current[kind] ?: emptyList<Long>()
+            if (map.containsKey(kind)) {
+                val nowSet = LinkedHashSet(nowList)
+                val wasSet = snap[kind] ?: LinkedHashSet()
+                val added = nowSet.filter { it !in wasSet }
+                val removed = wasSet.filter { it !in nowSet }
+                if (added.isNotEmpty() || removed.isNotEmpty()) jobs.add(Triple(kind, added, removed))
+            } else if (nowList.isNotEmpty()) {
+                fresh.add(kind)
+            }
         }
-        if (work.isEmpty()) return
+        // Only make new folders while there is room; an over-limit request would just be refused, and
+        // nagging about it from a background sync the user did not ask for would be noise.
+        val room = folderLimit(account) - controller.dialogFilters.size
+        val freshAllowed = fresh.take(maxOf(0, room))
+        if (jobs.isEmpty() && freshAllowed.isEmpty()) return
 
         val fragment = org.telegram.ui.LaunchActivity.getLastFragment() ?: return
         if (fragment.parentActivity == null) return
         lastSyncAt = now
 
-        val controller = MessagesController.getInstance(account)
-        val perFolder = chatsPerFolderLimit(account)
-        val queue = ArrayDeque(work.entries.map { Triple(it.key, it.value.first, it.value.second) })
+        val queue = ArrayDeque<Pair<Kind, Boolean>>()               // kind, isNew
+        for (j in jobs) queue.add(j.first to false)
+        for (k in freshAllowed) queue.add(k to true)
+        val deltas = jobs.associate { it.first to (it.second to it.third) }
+        val taken = HashSet<Int>()
 
         fun step() {
             val next = queue.removeFirstOrNull()
@@ -328,29 +344,57 @@ object AdminFolders {
                 NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
                 return
             }
-            val (kind, added, removed) = next
-            val filterId = map[kind] ?: return step()
-            val filter = controller.dialogFiltersById.get(filterId)
-            if (filter == null) {
-                // Deleted by hand or on another device: forget it rather than recreating something the
-                // user got rid of on purpose.
-                val m = kindToFilter(account); m.remove(kind); saveKindToFilter(account, m)
-                val sp = snapshot(account); sp[kind] = LinkedHashSet(); saveSnapshot(account, sp)
-                return step()
+            if (fragment.parentActivity == null) return
+            val (kind, isNew) = next
+
+            val filter: MessagesController.DialogFilter
+            val creating: Boolean
+            val peers: ArrayList<Long>
+
+            if (isNew) {
+                val tracked = createdIds(account).toSet()
+                val adopted = controller.dialogFilters
+                    .firstOrNull { it != null && !it.isDefault && it.name == kind.title && it.id !in tracked && it.id !in taken }
+                creating = adopted == null
+                filter = adopted ?: MessagesController.DialogFilter()
+                if (creating) {
+                    filter.id = freeFilterId(account, taken)
+                    filter.neverShow = ArrayList()
+                    filter.pinnedDialogs = LongSparseIntArray()
+                }
+                filter.name = kind.title
+                filter.flags = 0
+                filter.color = kind.ordinal % 8
+                peers = ArrayList((current[kind] ?: emptyList<Long>()).take(perFolder))
+                filter.alwaysShow = peers
+                val m = kindToFilter(account); m[kind] = filter.id; saveKindToFilter(account, m)
+                FolderIcons.setIconRes(filter.id, kind.iconRes)
+            } else {
+                val existing = controller.dialogFiltersById.get(map[kind] ?: -1)
+                if (existing == null) {
+                    // Deleted by hand or on another device: forget it rather than recreating something the
+                    // user got rid of on purpose.
+                    val m = kindToFilter(account); m.remove(kind); saveKindToFilter(account, m)
+                    val sp = snapshot(account); sp[kind] = LinkedHashSet(); saveSnapshot(account, sp)
+                    return step()
+                }
+                creating = false
+                filter = existing
+                val (added, removed) = deltas[kind] ?: (emptyList<Long>() to emptyList<Long>())
+                peers = ArrayList(filter.alwaysShow)
+                for (did in removed) peers.remove(did)
+                for (did in added) if (!peers.contains(did) && peers.size < perFolder) peers.add(did)
             }
-            val peers = ArrayList(filter.alwaysShow)
-            for (did in removed) peers.remove(did)
-            for (did in added) if (!peers.contains(did) && peers.size < perFolder) peers.add(did)
+            taken.add(filter.id)
 
             val sp = snapshot(account)
             sp[kind] = LinkedHashSet(current[kind] ?: emptyList())
             saveSnapshot(account, sp)
 
-            if (fragment.parentActivity == null) return
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 peers, filter.neverShow, filter.pinnedDialogs,
-                /* creatingNew */ false, /* atBegin */ false, /* hasUserChanged */ true,
+                /* creatingNew */ creating, /* atBegin */ false, /* hasUserChanged */ true,
                 /* resetUnreadCounter */ false, /* progress */ false, fragment
             ) { step() }
         }

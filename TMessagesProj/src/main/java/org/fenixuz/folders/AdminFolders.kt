@@ -36,6 +36,13 @@ object AdminFolders {
 
     private const val PREF = "db"
     private const val KEY_IDS_PREFIX = "admin_folder_ids_"
+    // What each folder held last time we synced, so we can tell a real rights change from a chat the user
+    // added or removed by hand. Without it an auto-sync would have to rewrite the whole list and would
+    // silently undo their edits.
+    private const val KEY_SNAP_PREFIX = "admin_folder_snap_"
+    /** At most one auto-sync per this interval; a rights change does not need a faster reaction. */
+    private const val SYNC_MIN_INTERVAL_MS = 10_000L
+    private var lastSyncAt = 0L
 
     /** The four buckets, in the order they are created (and therefore shown). */
     enum class Kind(val titleCode: Int, val iconRes: Int) {
@@ -63,17 +70,45 @@ object AdminFolders {
         ApplicationLoader.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE)
 
     private fun keyIds(account: Int) = KEY_IDS_PREFIX + account
+    private fun keySnap(account: Int) = KEY_SNAP_PREFIX + account
+
+    /** kind ordinal -> filter id, for the folders we own. */
+    private fun kindToFilter(account: Int): LinkedHashMap<Kind, Int> {
+        val out = LinkedHashMap<Kind, Int>()
+        val raw = prefs().getString(keyIds(account), "") ?: ""
+        for (part in raw.split(',')) {
+            val bits = part.split(':')
+            if (bits.size != 2) continue
+            val k = bits[0].toIntOrNull() ?: continue
+            val id = bits[1].toIntOrNull() ?: continue
+            if (k in Kind.entries.indices) out[Kind.entries[k]] = id
+        }
+        return out
+    }
+
+    private fun saveKindToFilter(account: Int, map: Map<Kind, Int>) {
+        prefs().edit().putString(keyIds(account), map.entries.joinToString(",") { "${'$'}{it.key.ordinal}:${'$'}{it.value}" }).apply()
+    }
+
+    /** The ids we filed per kind at the last sync. */
+    private fun snapshot(account: Int): LinkedHashMap<Kind, MutableSet<Long>> {
+        val out = LinkedHashMap<Kind, MutableSet<Long>>()
+        for (k in Kind.entries) out[k] = LinkedHashSet()
+        val raw = prefs().getString(keySnap(account), "") ?: ""
+        for ((i, chunk) in raw.split(';').withIndex()) {
+            if (i !in Kind.entries.indices || chunk.isEmpty()) continue
+            for (d in chunk.split(',')) d.toLongOrNull()?.let { out[Kind.entries[i]]!!.add(it) }
+        }
+        return out
+    }
+
+    private fun saveSnapshot(account: Int, snap: Map<Kind, out Collection<Long>>) {
+        val raw = Kind.entries.joinToString(";") { k -> (snap[k] ?: emptyList()).joinToString(",") }
+        prefs().edit().putString(keySnap(account), raw).apply()
+    }
 
     /** Ids of the folders WE created for [account]. Empty means the feature is off. */
-    fun createdIds(account: Int): List<Int> {
-        val raw = prefs().getString(keyIds(account), "") ?: ""
-        if (raw.isEmpty()) return emptyList()
-        return raw.split(',').mapNotNull { it.toIntOrNull() }
-    }
-
-    private fun saveIds(account: Int, ids: List<Int>) {
-        prefs().edit().putString(keyIds(account), ids.joinToString(",")).apply()
-    }
+    fun createdIds(account: Int): List<Int> = kindToFilter(account).values.toList()
 
     @JvmStatic
     fun isEnabled(account: Int): Boolean = createdIds(account).isNotEmpty()
@@ -204,7 +239,8 @@ object AdminFolders {
 
             newIds.add(filter.id)
             filed += peers.size
-            saveIds(account, createdIds(account) + filter.id)
+            val map = kindToFilter(account); map[kind] = filter.id; saveKindToFilter(account, map)
+            val snap = snapshot(account); snap[kind] = LinkedHashSet(peers); saveSnapshot(account, snap)
             // Our folders carry flags = 0 by design, and FolderIcons' flag-based guess only knows the
             // built-in filter types -- so without an explicit icon all four land on the generic one.
             FolderIcons.setIconRes(filter.id, kind.iconRes)
@@ -231,9 +267,83 @@ object AdminFolders {
             return
         }
         remove(fragment, account) {
-            saveIds(account, emptyList())
             create(fragment, account, onDone)
         }
+    }
+
+    /**
+     * Keep the folders current without the user going to Settings and pressing Refresh.
+     *
+     * It applies a DELTA, never a rewrite: only chats whose rights actually changed since the last sync are
+     * added or removed. That matters — these are ordinary Telegram folders and the user is free to drop a
+     * chat from one or add their own; rewriting the whole list every time would quietly undo that.
+     *
+     * No server call happens unless something really changed, and it needs a visible fragment because
+     * saveFilterToServer does; with the app in the background it simply waits for the next call.
+     */
+    @JvmStatic
+    fun syncIfNeeded(account: Int) {
+        if (!isEnabled(account)) return
+        val now = System.currentTimeMillis()
+        if (now - lastSyncAt < SYNC_MIN_INTERVAL_MS) return
+
+        val map = kindToFilter(account)
+        if (map.isEmpty()) return
+        val current = classify(account)
+        val snap = snapshot(account)
+
+        // Only kinds with a real change are touched.
+        val work = LinkedHashMap<Kind, Pair<List<Long>, List<Long>>>()
+        for ((kind, filterId) in map) {
+            val nowSet = LinkedHashSet(current[kind] ?: emptyList())
+            val wasSet = snap[kind] ?: LinkedHashSet()
+            val added = nowSet.filter { it !in wasSet }
+            val removed = wasSet.filter { it !in nowSet }
+            if (added.isNotEmpty() || removed.isNotEmpty()) work[kind] = added to removed
+        }
+        if (work.isEmpty()) return
+
+        val fragment = org.telegram.ui.LaunchActivity.getLastFragment() ?: return
+        if (fragment.parentActivity == null) return
+        lastSyncAt = now
+
+        val controller = MessagesController.getInstance(account)
+        val perFolder = chatsPerFolderLimit(account)
+        val queue = ArrayDeque(work.entries.map { Triple(it.key, it.value.first, it.value.second) })
+
+        fun step() {
+            val next = queue.removeFirstOrNull()
+            if (next == null) {
+                NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
+                return
+            }
+            val (kind, added, removed) = next
+            val filterId = map[kind] ?: return step()
+            val filter = controller.dialogFiltersById.get(filterId)
+            if (filter == null) {
+                // Deleted by hand or on another device: forget it rather than recreating something the
+                // user got rid of on purpose.
+                val m = kindToFilter(account); m.remove(kind); saveKindToFilter(account, m)
+                val sp = snapshot(account); sp[kind] = LinkedHashSet(); saveSnapshot(account, sp)
+                return step()
+            }
+            val peers = ArrayList(filter.alwaysShow)
+            for (did in removed) peers.remove(did)
+            for (did in added) if (!peers.contains(did) && peers.size < perFolder) peers.add(did)
+
+            val sp = snapshot(account)
+            sp[kind] = LinkedHashSet(current[kind] ?: emptyList())
+            saveSnapshot(account, sp)
+
+            if (fragment.parentActivity == null) return
+            FilterCreateActivity.saveFilterToServer(
+                filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
+                peers, filter.neverShow, filter.pinnedDialogs,
+                /* creatingNew */ false, /* atBegin */ false, /* hasUserChanged */ true,
+                /* resetUnreadCounter */ false, /* progress */ false, fragment
+            ) { step() }
+        }
+        step()
     }
 
     /** Delete exactly the folders we created, on the server and locally. Never touches the user's own. */
@@ -244,7 +354,7 @@ object AdminFolders {
         fun step() {
             val id = queue.removeFirstOrNull()
             if (id == null) {
-                saveIds(account, emptyList())
+                prefs().edit().remove(keyIds(account)).remove(keySnap(account)).apply()
                 onDone()
                 return
             }

@@ -7110,6 +7110,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
     public void onResume() {
         super.onResume();
+        // Novagram: keep the admin/owner folders current. Their membership is an explicit peer list --
+        // Telegram has no "I am an admin here" filter flag -- so a promotion or demotion has to be applied
+        // by us. Doing it here means the user never has to go and press Refresh: coming back to the chat
+        // list is enough. It is a delta and it is rate-limited, so it costs nothing when nothing changed.
+        org.fenixuz.folders.AdminFolders.syncIfNeeded(currentAccount);
         // Novagram: re-apply the "hide folder tabs" toggle once when returning from the settings screen
         // (DialogsActivity is paused while that screen is open, so the change is applied here on resume).
         if (org.fenixuz.utils.HideTabs.INSTANCE.consumeDirty()) {

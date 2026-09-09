@@ -22,6 +22,7 @@ import org.fenixuz.utils.CameraSituation
 import org.fenixuz.utils.ConfirmDialogsPref
 import org.fenixuz.utils.GhostStory
 import org.fenixuz.utils.HideTabs
+import org.fenixuz.folders.AdminFolders
 import org.fenixuz.utils.LanguageCode
 import org.fenixuz.utils.MessageReminder
 import org.fenixuz.utils.StoryDownload
@@ -90,6 +91,8 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
     private val ROUND_CAMERA_FRONT = 27
     private val APK_SHIELD = 28
     private val VOICE_MIC = 29
+    private val ADMIN_FOLDERS = 30
+    private val ADMIN_FOLDERS_REFRESH = 31
 
     // Onboarding: a toolbar "?" replays the full feature tour; the short tour auto-runs once on first open.
     private val HELP_BUTTON = 1001
@@ -119,7 +122,8 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
         REMINDER_ENABLED to "reminder",
         STRANGER_SHIELD to "protection_from_strangers",
         APK_SHIELD to "block_apk",
-        ROUND_CAMERA_FRONT to "round_video_camera"
+        ROUND_CAMERA_FRONT to "round_video_camera",
+        ADMIN_FOLDERS to "admin_folders"
     )
     private var targetConsumed = false
     private var flashAnimator: ValueAnimator? = null
@@ -352,6 +356,15 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
             UItem.asButtonCheck(HIDE_TABS, LanguageCode.getMyTitles(260), LanguageCode.getMyTitles(261))
                 .setChecked(HideTabs.isEnabled())
         )
+        items.add(
+            UItem.asButtonCheck(ADMIN_FOLDERS, LanguageCode.getMyTitles(391), LanguageCode.getMyTitles(392))
+                .setChecked(AdminFolders.isEnabled(currentAccount))
+        )
+        // Refresh only exists once the folders do. They are a snapshot of the rights the user held when
+        // they were built, so this is the way back to accurate after a promotion or demotion.
+        if (AdminFolders.isEnabled(currentAccount)) {
+            items.add(UItem.asButton(ADMIN_FOLDERS_REFRESH, LanguageCode.getMyTitles(398)))
+        }
         items.add(UItem.asShadow(null))
 
         items.add(UItem.asHeader(LanguageCode.getMyTitles(262)))
@@ -506,6 +519,38 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
                 // Persist + mark dirty; DialogsActivity.onResume re-applies it when we navigate back.
                 HideTabs.toggle()
                 (view as NotificationsCheckCell).setChecked(HideTabs.isEnabled())
+            }
+            ADMIN_FOLDERS -> {
+                val context = parentActivity ?: return
+                if (!AdminFolders.isEnabled(currentAccount)) {
+                    // These folders are written to the Telegram ACCOUNT, not to this device -- they will
+                    // turn up in official Telegram on every other device the user is signed in on. Never
+                    // do that without saying so first.
+                    AlertDialog.Builder(context)
+                        .setTitle(LanguageCode.getMyTitles(391))
+                        .setMessage(LanguageCode.getMyTitles(397))
+                        .setPositiveButton(LanguageCode.getMyTitles(323)) { _, _ ->
+                            AdminFolders.create(this, currentAccount) { result -> reportAdminFolders(result, item, view) }
+                        }
+                        .setNegativeButton(LanguageCode.getMyTitles(80), null)
+                        .show()
+                } else {
+                    AlertDialog.Builder(context)
+                        .setTitle(LanguageCode.getMyTitles(391))
+                        .setMessage(LanguageCode.getMyTitles(402))
+                        .setPositiveButton(LanguageCode.getMyTitles(384)) { _, _ ->
+                            AdminFolders.remove(this, currentAccount) {
+                                item.checked = false
+                                (view as? NotificationsCheckCell)?.setChecked(false)
+                                listView?.adapter?.update(true)
+                            }
+                        }
+                        .setNegativeButton(LanguageCode.getMyTitles(80), null)
+                        .show()
+                }
+            }
+            ADMIN_FOLDERS_REFRESH -> {
+                AdminFolders.refresh(this, currentAccount) { result -> reportAdminFolders(result, null, null) }
             }
             AUTO_ACCEPT_JOIN -> {
                 AutoAcceptJoin.toggle()
@@ -741,4 +786,39 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
         // Don't let a flash keep running (touching views) after we leave the screen.
         flashAnimator?.cancel()
     }
+
+    /**
+     * Tell the user what actually happened. Three outcomes matter and each needs different words:
+     * nothing could be done (say why, leave the switch off), it worked (flip the switch, rebuild the list
+     * so Refresh appears), and it worked but a folder hit Telegram's per-folder cap (say which, and how
+     * many fit) -- silently keeping the first 100 is how a folder ends up looking simply wrong.
+     */
+    private fun reportAdminFolders(result: AdminFolders.Result, item: UItem?, view: android.view.View?) {
+        val context = parentActivity ?: return
+        if (result.blockedReason != null) {
+            AlertDialog.Builder(context)
+                .setTitle(LanguageCode.getMyTitles(391))
+                .setMessage(result.blockedReason)
+                .setPositiveButton(LanguageCode.getMyTitles(323), null)
+                .show()
+            return
+        }
+        item?.checked = true
+        (view as? NotificationsCheckCell)?.setChecked(true)
+        listView?.adapter?.update(true)
+
+        if (result.truncated.isEmpty()) {
+            BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, LanguageCode.getMyTitles(403)).show()
+        } else {
+            val text = result.truncated.entries.joinToString("\n") { (title, kept) ->
+                LanguageCode.getMyTitles(401).replace("%1\$s", title).replace("%2\$d", kept.toString())
+            }
+            AlertDialog.Builder(context)
+                .setTitle(LanguageCode.getMyTitles(391))
+                .setMessage(text)
+                .setPositiveButton(LanguageCode.getMyTitles(323), null)
+                .show()
+        }
+    }
+
 }

@@ -87,7 +87,7 @@ object AdminFolders {
     }
 
     private fun saveKindToFilter(account: Int, map: Map<Kind, Int>) {
-        prefs().edit().putString(keyIds(account), map.entries.joinToString(",") { "${'$'}{it.key.ordinal}:${'$'}{it.value}" }).apply()
+        prefs().edit().putString(keyIds(account), map.entries.joinToString(",") { it.key.ordinal.toString() + ":" + it.value }).apply()
     }
 
     /** The ids we filed per kind at the last sync. */
@@ -227,15 +227,26 @@ object AdminFolders {
                 ArrayList(peersAll)
             }
 
-            val filter = MessagesController.DialogFilter()
-            filter.id = freeFilterId(account, taken)
+            // Adopt a folder of ours that we have lost track of instead of making a second one. This
+            // happens after a reinstall, after clearing app data, or if our own bookkeeping ever breaks --
+            // and without it the user ends up with a duplicate set every time they toggle the feature.
+            // Matched on the exact title we generate, and only among folders we are not already tracking.
+            val tracked = createdIds(account).toSet()
+            val adopted = MessagesController.getInstance(account).dialogFilters
+                .firstOrNull { it != null && !it.isDefault && it.name == kind.title && it.id !in tracked && it.id !in taken }
+
+            val creating = adopted == null
+            val filter = adopted ?: MessagesController.DialogFilter()
+            if (creating) {
+                filter.id = freeFilterId(account, taken)
+                filter.neverShow = ArrayList()
+                filter.pinnedDialogs = LongSparseIntArray()
+            }
             taken.add(filter.id)
             filter.name = kind.title
             filter.flags = 0                     // no auto-include: membership is exactly [alwaysShow]
             filter.color = kind.ordinal % 8
             filter.alwaysShow = peers
-            filter.neverShow = ArrayList()
-            filter.pinnedDialogs = LongSparseIntArray()
 
             newIds.add(filter.id)
             filed += peers.size
@@ -248,7 +259,7 @@ object AdminFolders {
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 filter.alwaysShow, filter.neverShow, filter.pinnedDialogs,
-                /* creatingNew */ true, /* atBegin */ false, /* hasUserChanged */ true,
+                /* creatingNew */ creating, /* atBegin */ false, /* hasUserChanged */ true,
                 /* resetUnreadCounter */ false, /* progress */ false, fragment
             ) { step() }   // strictly sequential: parallel saves race on the server's filter order
         }

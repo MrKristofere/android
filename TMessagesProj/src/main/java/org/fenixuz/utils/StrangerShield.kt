@@ -170,10 +170,15 @@ object StrangerShield {
     /**
      * THE single rule: does this dialog belong in the stranger inbox (hidden from the main list,
      * silenced, badge-excluded) for [account]? A stranger AND (the shield is on now, OR it was captured
-     * while on in this account). Pure — no side effects; capture is done explicitly via [capture].
+     * while on in this account). No side effects beyond the one-shot lazy load; capture is done
+     * explicitly via [capture].
      */
     @JvmStatic
     fun belongsInInbox(account: Int, user: TLRPC.User?, dialogId: Long): Boolean {
+        // Must come first. [allowed] and [captured] are read below, and until ensureLoaded() has run they
+        // are empty -- so a whitelisted stranger would fail the trust check and get filed anyway. It used
+        // to be reached only via isEnabled() on the last line, i.e. AFTER both sets were consulted.
+        ensureLoaded()
         if (!isStranger(user)) return false
         if (allowed[account].contains(dialogId)) return false   // explicitly trusted → always in main list
         return isEnabled(account) || captured[account].contains(dialogId)

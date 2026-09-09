@@ -1547,8 +1547,11 @@ public class NotificationsController extends BaseController implements Notificat
                 LongSparseIntArray toDismiss = null;
                 for (int i = 0; i < pushDialogs.size(); i++) {
                     long did = pushDialogs.keyAt(i);
+                    // belongsInInbox, not isStranger: the whitelist ("Not a stranger") has to win here
+                    // too, otherwise this dismisses the notifications of someone the user explicitly
+                    // trusted. Every other call site already asks the same question this way.
                     if (DialogObject.isUserDialog(did)
-                            && org.fenixuz.utils.StrangerShield.isStranger(getMessagesController().getUser(did))) {
+                            && org.fenixuz.utils.StrangerShield.belongsInInbox(currentAccount, getMessagesController().getUser(did), did)) {
                         if (toDismiss == null) {
                             toDismiss = new LongSparseIntArray();
                         }

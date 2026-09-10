@@ -258,9 +258,17 @@ object AdminFolders {
             return
         }
 
-        val existing = MessagesController.getInstance(account).dialogFilters.size
-        val free = folderLimit(account) - existing
-        if (free < buckets.size) {
+        // Count only the folders we would genuinely have to ADD. A bucket whose folder is already on the
+        // account gets adopted and needs no slot, so charging for it would block the common repair case --
+        // re-enabling when four of ours are already there -- with a limit message that is simply wrong.
+        val filters = MessagesController.getInstance(account).dialogFilters
+        val existing = filters.size
+        val trackedNow = createdIds(account).toSet()
+        val needSlots = buckets.keys.count { kind ->
+            val known = titlesFor(kind)
+            filters.none { it != null && !it.isDefault && (it.id in trackedNow || it.name in known) }
+        }
+        if (folderLimit(account) - existing < needSlots) {
             val msg = LanguageCode.getMyTitles(400)
                 .replace("%1\$d", folderLimit(account).toString())
                 .replace("%2\$d", existing.toString())

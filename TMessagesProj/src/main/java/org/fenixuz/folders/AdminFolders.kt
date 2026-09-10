@@ -149,6 +149,41 @@ object AdminFolders {
         prefs().edit().putString(keySnap(account), raw).apply()
     }
 
+    /**
+     * Every title this feature has ever given a folder OF THIS KIND, in every language it ships.
+     *
+     * Identity is the stored kind->id map; this is the recovery net for when that map is unavailable, and
+     * it has to be per-kind or a sweep would file the channels folder under groups. Two real cases need it:
+     * the titles were shortened once to fit Telegram's 12-character cap, and the user can switch the app
+     * language at any time -- in both, a folder we made no longer carries the title we would generate now.
+     * Matching only the current title is what produced a duplicate set of four.
+     *
+     * A server-side marker would be better, but the folder's `emoticon` field is not on
+     * MessagesController.DialogFilter and saveFilterToServer does not send it, so keeping one would mean
+     * patching upstream's model and its save path -- a debt that comes due at every re-base.
+     */
+    private fun titlesFor(kind: Kind): Set<String> {
+        val out = LinkedHashSet<String>()
+        LanguageCode.getMyTitles(kind.titleCode)          // forces the table to initialize
+        LanguageCode.titlesLanguages.getOrNull(kind.titleCode)?.let { t ->
+            for (v in listOf(t.en, t.uz, t.ru)) {
+                out.add(v)
+                out.add(v.take(MAX_FOLDER_NAME))          // what actually reached the server
+            }
+        }
+        out.addAll(LEGACY_TITLES[kind] ?: emptyList())
+        out.remove("")
+        return out
+    }
+
+    /** Titles used before the 12-character clamp; folders created then still carry them. */
+    private val LEGACY_TITLES: Map<Kind, List<String>> = mapOf(
+        Kind.GROUP_OWNER to listOf("Mening guruhlarim", "My groups", "Мои группы"),
+        Kind.GROUP_ADMIN to listOf("Admin guruhlar", "Admin groups", "Группы-админ"),
+        Kind.CHANNEL_OWNER to listOf("Mening kanallarim", "My channels", "Мои каналы"),
+        Kind.CHANNEL_ADMIN to listOf("Admin kanallar", "Admin channels", "Каналы-админ")
+    )
+
     /** Ids of the folders WE created for [account]. Empty means the feature is off. */
     fun createdIds(account: Int): List<Int> = kindToFilter(account).values.toList()
 
@@ -274,8 +309,9 @@ object AdminFolders {
             // and without it the user ends up with a duplicate set every time they toggle the feature.
             // Matched on the exact title we generate, and only among folders we are not already tracking.
             val tracked = createdIds(account).toSet()
+            val known = titlesFor(kind)
             val adopted = MessagesController.getInstance(account).dialogFilters
-                .firstOrNull { it != null && !it.isDefault && it.name == kind.title && it.id !in tracked && it.id !in taken }
+                .firstOrNull { it != null && !it.isDefault && it.name in known && it.id !in tracked && it.id !in taken }
 
             val creating = adopted == null
             val filter = adopted ?: MessagesController.DialogFilter()
@@ -405,8 +441,9 @@ object AdminFolders {
 
             if (isNew) {
                 val tracked = createdIds(account).toSet()
+                val known = titlesFor(kind)
                 val adopted = controller.dialogFilters
-                    .firstOrNull { it != null && !it.isDefault && it.name == kind.title && it.id !in tracked && it.id !in taken }
+                    .firstOrNull { it != null && !it.isDefault && it.name in known && it.id !in tracked && it.id !in taken }
                 creating = adopted == null
                 filter = adopted ?: MessagesController.DialogFilter()
                 if (creating) {
@@ -455,10 +492,24 @@ object AdminFolders {
         step()
     }
 
-    /** Delete exactly the folders we created, on the server and locally. Never touches the user's own. */
+    /**
+     * Delete the folders this feature made, on the server and locally.
+     *
+     * Two sources, because the tracked ids are not always the whole story. Anything our own bookkeeping
+     * lost — a rename, a language switch, a reinstall, or one of my own bugs earlier in this feature's
+     * life — is still on the account under a title only we generate, and leaving those behind means the
+     * user has to go and delete them by hand. So the tracked ids come first and then untracked folders
+     * whose title is one of ours are swept too. Titles are specific enough that a collision with a folder
+     * the user named themselves is unlikely, and this only ever runs from an explicit, confirmed "remove".
+     */
     fun remove(fragment: BaseFragment, account: Int, onDone: () -> Unit) {
         val controller = MessagesController.getInstance(account)
-        val queue = ArrayDeque(createdIds(account))
+        val ids = LinkedHashSet(createdIds(account))
+        val allKnown = Kind.entries.flatMap { titlesFor(it) }.toSet()
+        for (f in ArrayList(controller.dialogFilters)) {
+            if (f != null && !f.isDefault && f.name in allKnown) ids.add(f.id)
+        }
+        val queue = ArrayDeque(ids)
 
         fun step() {
             val id = queue.removeFirstOrNull()

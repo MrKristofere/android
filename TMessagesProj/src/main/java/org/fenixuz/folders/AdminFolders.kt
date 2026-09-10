@@ -50,7 +50,10 @@ object AdminFolders {
 
     /** At most one auto-sync per this interval; a rights change does not need a faster reaction. */
     private const val SYNC_MIN_INTERVAL_MS = 10_000L
-    private var lastSyncAt = 0L
+    private val lastSyncAt = LongArray(UserConfig.MAX_ACCOUNT_COUNT)
+
+    /** Owner of the folders we recorded, so state cannot survive a logout into a different account. */
+    private const val KEY_UID_PREFIX = "admin_folder_uid_"
 
     /** The four buckets, in the order they are created (and therefore shown). */
     enum class Kind(val titleCode: Int, val iconRes: Int) {
@@ -79,10 +82,30 @@ object AdminFolders {
 
     private fun keyIds(account: Int) = KEY_IDS_PREFIX + account
     private fun keySnap(account: Int) = KEY_SNAP_PREFIX + account
+    private fun keyUid(account: Int) = KEY_UID_PREFIX + account
+
+    /**
+     * Account slots are reused: log out of index 0 and the next account signs in as index 0 too. Filter ids
+     * start at 2, so the ids we recorded would very likely collide with folders belonging to the NEW user --
+     * and a sync would then rewrite a stranger's folder with our peer list. Tying the state to the user id
+     * that produced it makes that impossible, and self-heals without needing a logout listener.
+     */
+    private fun stateBelongsToCurrentUser(account: Int): Boolean {
+        val uid = UserConfig.getInstance(account).clientUserId
+        if (uid == 0L) return false
+        val stored = prefs().getLong(keyUid(account), 0L)
+        if (stored == uid) return true
+        if (stored != 0L) {
+            // Left over from whoever was signed in here before: drop it rather than acting on it.
+            prefs().edit().remove(keyIds(account)).remove(keySnap(account)).remove(keyUid(account)).apply()
+        }
+        return false
+    }
 
     /** kind ordinal -> filter id, for the folders we own. */
     private fun kindToFilter(account: Int): LinkedHashMap<Kind, Int> {
         val out = LinkedHashMap<Kind, Int>()
+        if (!stateBelongsToCurrentUser(account)) return out
         val raw = prefs().getString(keyIds(account), "") ?: ""
         for (part in raw.split(',')) {
             val bits = part.split(':')
@@ -95,7 +118,10 @@ object AdminFolders {
     }
 
     private fun saveKindToFilter(account: Int, map: Map<Kind, Int>) {
-        prefs().edit().putString(keyIds(account), map.entries.joinToString(",") { it.key.ordinal.toString() + ":" + it.value }).apply()
+        prefs().edit()
+            .putString(keyIds(account), map.entries.joinToString(",") { it.key.ordinal.toString() + ":" + it.value })
+            .putLong(keyUid(account), UserConfig.getInstance(account).clientUserId)
+            .apply()
     }
 
     /** The ids we filed per kind at the last sync. */
@@ -302,9 +328,12 @@ object AdminFolders {
      */
     @JvmStatic
     fun syncIfNeeded(account: Int) {
-        if (!isEnabled(account)) return
+        // Order matters: this is called from updateInterfaces, which fires constantly. The time check is a
+        // subtraction; isEnabled() reads a preference and parses it into a map. Cheapest guard first.
+        if (account < 0 || account >= lastSyncAt.size) return
         val now = System.currentTimeMillis()
-        if (now - lastSyncAt < SYNC_MIN_INTERVAL_MS) return
+        if (now - lastSyncAt[account] < SYNC_MIN_INTERVAL_MS) return
+        if (!isEnabled(account)) return
 
         val controller = MessagesController.getInstance(account)
         // Wait for the folders to come off disk. dialogFiltersById is empty until then, and this can run at
@@ -313,7 +342,7 @@ object AdminFolders {
         if (!controller.dialogFiltersLoaded) return
         // Claim the interval here, not once work is found. classify() walks the whole dialog list and this
         // is called from a hot notification, so the CHECK is what has to be rate-limited.
-        lastSyncAt = now
+        lastSyncAt[account] = now
 
         val map = kindToFilter(account)
         if (map.isEmpty()) return
@@ -426,7 +455,7 @@ object AdminFolders {
         fun step() {
             val id = queue.removeFirstOrNull()
             if (id == null) {
-                prefs().edit().remove(keyIds(account)).remove(keySnap(account)).apply()
+                prefs().edit().remove(keyIds(account)).remove(keySnap(account)).remove(keyUid(account)).apply()
                 onDone()
                 return
             }

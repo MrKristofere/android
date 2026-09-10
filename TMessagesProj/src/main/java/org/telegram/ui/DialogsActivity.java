@@ -10812,6 +10812,13 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @SuppressWarnings("unchecked")
     @Override
     public void didReceivedNotification(int id, int account, Object... args) {
+        // Novagram: onResume alone is not enough for the admin/owner folders -- if the user is already
+        // sitting on the chat list when someone promotes them from another device, no resume ever happens.
+        // These two carry that change (a new chat appears, or a Chat object is refreshed with new rights).
+        // syncIfNeeded rate-limits itself and does nothing when nothing changed, so this is cheap.
+        if (id == NotificationCenter.updateInterfaces || id == NotificationCenter.dialogsNeedReload) {
+            org.fenixuz.folders.AdminFolders.syncIfNeeded(currentAccount);
+        }
         if (id == NotificationCenter.dialogsNeedReload) {
             if (viewPages == null || dialogsListFrozen) {
                 return;

@@ -307,10 +307,13 @@ object AdminFolders {
         if (now - lastSyncAt < SYNC_MIN_INTERVAL_MS) return
 
         val controller = MessagesController.getInstance(account)
-        // Wait for the folders to come off disk. dialogFiltersById is empty until then, and this runs from
-        // DialogsActivity.onResume() -- i.e. exactly at cold start. Without this guard every folder looks
-        // deleted, the branch below "forgets" all four, and the feature switches itself off on restart.
+        // Wait for the folders to come off disk. dialogFiltersById is empty until then, and this can run at
+        // cold start. Without this guard every folder looks deleted, the branch below "forgets" all four,
+        // and the feature switches itself off on restart.
         if (!controller.dialogFiltersLoaded) return
+        // Claim the interval here, not once work is found. classify() walks the whole dialog list and this
+        // is called from a hot notification, so the CHECK is what has to be rate-limited.
+        lastSyncAt = now
 
         val map = kindToFilter(account)
         if (map.isEmpty()) return
@@ -343,7 +346,6 @@ object AdminFolders {
 
         val fragment = org.telegram.ui.LaunchActivity.getLastFragment() ?: return
         if (fragment.parentActivity == null) return
-        lastSyncAt = now
 
         val queue = ArrayDeque<Pair<Kind, Boolean>>()               // kind, isNew
         for (j in jobs) queue.add(j.first to false)

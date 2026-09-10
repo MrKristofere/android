@@ -95,10 +95,18 @@ object AdminFolders {
         if (uid == 0L) return false
         val stored = prefs().getLong(keyUid(account), 0L)
         if (stored == uid) return true
-        if (stored != 0L) {
-            // Left over from whoever was signed in here before: drop it rather than acting on it.
-            prefs().edit().remove(keyIds(account)).remove(keySnap(account)).remove(keyUid(account)).apply()
+        if (stored == 0L) {
+            // No stamp: either there is nothing recorded, or the folders were made before this check
+            // existed. Adopt the latter for the signed-in user instead of discarding it -- rejecting
+            // unstamped state is what made the feature read as off for anyone who had already enabled it.
+            val hasState = !prefs().getString(keyIds(account), "").isNullOrEmpty()
+            if (!hasState) return false
+            prefs().edit().putLong(keyUid(account), uid).apply()
+            return true
         }
+        // Stamped by a different user: this slot was reused after a logout. Drop it rather than acting on
+        // folders that belong to somebody else.
+        prefs().edit().remove(keyIds(account)).remove(keySnap(account)).remove(keyUid(account)).apply()
         return false
     }
 

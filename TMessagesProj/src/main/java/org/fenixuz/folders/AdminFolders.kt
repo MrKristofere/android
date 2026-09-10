@@ -40,6 +40,14 @@ object AdminFolders {
     // added or removed by hand. Without it an auto-sync would have to rewrite the whole list and would
     // silently undo their edits.
     private const val KEY_SNAP_PREFIX = "admin_folder_snap_"
+    /**
+     * Telegram refuses a folder whose title is longer than this with 400 MESSAGE_TOO_LONG, and the folder
+     * is then dropped again the next time filters are fetched from the server -- which looks exactly like
+     * "it saved and then vanished". FilterCreateActivity.MAX_NAME_LENGTH is the same number; we clamp
+     * rather than trust the translations, so a longer wording later cannot break creation.
+     */
+    private const val MAX_FOLDER_NAME = 12
+
     /** At most one auto-sync per this interval; a rights change does not need a faster reaction. */
     private const val SYNC_MIN_INTERVAL_MS = 10_000L
     private var lastSyncAt = 0L
@@ -51,7 +59,7 @@ object AdminFolders {
         CHANNEL_OWNER(395, R.drawable.msg_channel),
         CHANNEL_ADMIN(396, R.drawable.msg_folders_channels);
 
-        val title: String get() = LanguageCode.getMyTitles(titleCode)
+        val title: String get() = LanguageCode.getMyTitles(titleCode).take(MAX_FOLDER_NAME)
     }
 
     /** What a create/refresh actually managed to do, so the caller can tell the user the truth. */

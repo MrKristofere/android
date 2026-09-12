@@ -392,6 +392,14 @@ object AdminFolders {
             // built-in filter types -- so without an explicit icon all four land on the generic one.
             FolderIcons.setIconRes(filter.id, kind.iconRes)
 
+            // A filter with no peers and no auto-include flags is rejected (FILTER_INCLUDE_EMPTY), and if it
+            // ever were accepted it would empty a folder the user is relying on. Whatever produced an empty
+            // list, sending it is never the right move -- leave the folder as it is.
+            if (peers.isEmpty()) {
+                FileLog.d("Novagram folders: " + kind.name + " computed an EMPTY peer list -- skipping")
+                return step()
+            }
+            FileLog.d("Novagram folders: sending " + kind.name + " id=" + filter.id + " creating=" + creating + " peers=" + peers.size + " resolvable=" + peers.count { d -> MessagesController.getInstance(account).getChat(-d) != null } + " sample=" + peers.take(3))
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 filter.alwaysShow, filter.neverShow, filter.pinnedDialogs,
@@ -447,6 +455,11 @@ object AdminFolders {
         // cold start. Without this guard every folder looks deleted, the branch below "forgets" all four,
         // and the feature switches itself off on restart.
         if (!controller.dialogFiltersLoaded) return
+        // And for the DIALOGS. Folders come off disk before the chat list does, and classify() reads the
+        // chat list: in that window every bucket looks empty, the delta reads as 'every chat lost its
+        // rights', and the update would strip all four folders bare. The server refused it with
+        // FILTER_INCLUDE_EMPTY -- its validation is the only reason the folders were not emptied.
+        if (!controller.dialogsLoaded || controller.getAllDialogs().isEmpty()) return
         // Claim the interval here, not once work is found. classify() walks the whole dialog list and this
         // is called from a hot notification, so the CHECK is what has to be rate-limited.
         lastSyncAt[account] = now
@@ -549,6 +562,14 @@ object AdminFolders {
             sp[kind] = LinkedHashSet(current[kind] ?: emptyList())
             saveSnapshot(account, sp)
 
+            // A filter with no peers and no auto-include flags is rejected (FILTER_INCLUDE_EMPTY), and if it
+            // ever were accepted it would empty a folder the user is relying on. Whatever produced an empty
+            // list, sending it is never the right move -- leave the folder as it is.
+            if (peers.isEmpty()) {
+                FileLog.d("Novagram folders: " + kind.name + " computed an EMPTY peer list -- skipping")
+                return step()
+            }
+            FileLog.d("Novagram folders: sending " + kind.name + " id=" + filter.id + " creating=" + creating + " peers=" + peers.size + " resolvable=" + peers.count { d -> MessagesController.getInstance(account).getChat(-d) != null } + " sample=" + peers.take(3))
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 peers, filter.neverShow, filter.pinnedDialogs,

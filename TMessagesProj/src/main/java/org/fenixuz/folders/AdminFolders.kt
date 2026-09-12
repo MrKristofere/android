@@ -7,6 +7,7 @@ import org.fenixuz.utils.LanguageCode
 import org.telegram.messenger.ApplicationLoader
 import org.telegram.messenger.ChatObject
 import org.telegram.messenger.DialogObject
+import org.telegram.messenger.FileLog
 import org.telegram.messenger.MessagesController
 import org.telegram.messenger.NotificationCenter
 import org.telegram.messenger.R
@@ -65,6 +66,17 @@ object AdminFolders {
     /** At most one auto-sync per this interval; a rights change does not need a faster reaction. */
     private const val SYNC_MIN_INTERVAL_MS = 10_000L
     private val lastSyncAt = LongArray(UserConfig.MAX_ACCOUNT_COUNT)
+
+    /**
+     * One folder operation at a time per account. Every one of these is a CHAIN of server round-trips, and
+     * they all read the account's current folder list to decide what to adopt, create or delete. Two chains
+     * overlapping — the obvious way being a quick off-then-on — means the second one reads a list the first
+     * is halfway through changing, and duplicates fall straight out of that.
+     */
+    private val busy = BooleanArray(UserConfig.MAX_ACCOUNT_COUNT)
+
+    @JvmStatic
+    fun isBusy(account: Int): Boolean = account in busy.indices && busy[account]
 
     /** Owner of the folders we recorded, so state cannot survive a logout into a different account. */
     private const val KEY_UID_PREFIX = "admin_folder_uid_"
@@ -267,9 +279,12 @@ object AdminFolders {
      * this runs from a screen and never from a background task.
      */
     fun create(fragment: BaseFragment, account: Int, onDone: (Result) -> Unit) {
+        if (account !in busy.indices || busy[account]) return
+        busy[account] = true
+        val done: (Result) -> Unit = { r -> busy[account] = false; onDone(r) }
         val buckets = classify(account).filterValues { it.isNotEmpty() }
         if (buckets.isEmpty()) {
-            onDone(Result(0, 0, LinkedHashMap(), LanguageCode.getMyTitles(399)))
+            done(Result(0, 0, LinkedHashMap(), LanguageCode.getMyTitles(399)))
             return
         }
 
@@ -287,7 +302,7 @@ object AdminFolders {
             val msg = LanguageCode.getMyTitles(400)
                 .replace("%1\$d", folderLimit(account).toString())
                 .replace("%2\$d", existing.toString())
-            onDone(Result(0, 0, LinkedHashMap(), msg))
+            done(Result(0, 0, LinkedHashMap(), msg))
             return
         }
 
@@ -297,6 +312,8 @@ object AdminFolders {
         val newIds = ArrayList<Int>()
         var filed = 0
 
+        FileLog.d("Novagram folders: create -- buckets " + buckets.entries.joinToString { it.key.name + "=" + it.value.size }
+                + ", tracked " + createdIds(account) + ", existing folders " + existing + ", need " + needSlots + " new slot(s)")
         val queue = ArrayDeque(buckets.entries.map { it.key to it.value })
 
         fun step() {
@@ -305,7 +322,7 @@ object AdminFolders {
                 // MessagesController.addFilter() does NOT post this (removeFilter does), so without it the
                 // tabs only appear after DialogsActivity is recreated -- which reads as "nothing happened".
                 NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
-                onDone(Result(newIds.size, filed, truncated, null))
+                done(Result(newIds.size, filed, truncated, null))
                 return
             }
             // saveFilterToServer returns WITHOUT calling onFinish when the fragment has lost its activity
@@ -314,7 +331,7 @@ object AdminFolders {
             // still clean them up.
             if (fragment.parentActivity == null) {
                 NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
-                onDone(Result(newIds.size, filed, truncated, null))
+                done(Result(newIds.size, filed, truncated, null))
                 return
             }
             val (kind, peersAll) = next
@@ -337,6 +354,8 @@ object AdminFolders {
                 .firstOrNull { it != null && !it.isDefault && it.name in known && it.id !in tracked && it.id !in taken }
 
             val creating = adopted == null
+            FileLog.d("Novagram folders: " + kind.name + " -> " + (if (creating) "CREATE new" else "ADOPT id=" + adopted!!.id + " name='" + adopted.name + "'")
+                    + " (known titles: " + known.joinToString("|") + ")")
             val filter = adopted ?: MessagesController.DialogFilter()
             if (creating) {
                 filter.id = freeFilterId(account, taken)
@@ -526,6 +545,8 @@ object AdminFolders {
      * the user named themselves is unlikely, and this only ever runs from an explicit, confirmed "remove".
      */
     fun remove(fragment: BaseFragment, account: Int, onDone: () -> Unit) {
+        if (account !in busy.indices || busy[account]) return
+        busy[account] = true
         val controller = MessagesController.getInstance(account)
         val ids = LinkedHashSet(createdIds(account))
         val allKnown = Kind.entries.flatMap { titlesFor(it) }.toSet()
@@ -533,11 +554,24 @@ object AdminFolders {
             if (f != null && !f.isDefault && f.name in allKnown) ids.add(f.id)
         }
         val queue = ArrayDeque(ids)
+        val failed = LinkedHashSet<Int>()
+        FileLog.d("Novagram folders: removing " + ids.size + " folder(s): " + ids)
 
         fun step() {
             val id = queue.removeFirstOrNull()
             if (id == null) {
-                prefs().edit().remove(keyIds(account)).remove(keySnap(account)).remove(keyUid(account)).apply()
+                // Keep tracking anything the server refused to delete. Forgetting it would turn a folder we
+                // made into an untracked stray that the next enable cannot adopt -- which is how a "remove"
+                // that half-failed turns into two sets of folders.
+                if (failed.isEmpty()) {
+                    prefs().edit().remove(keyIds(account)).remove(keySnap(account)).remove(keyUid(account)).apply()
+                } else {
+                    FileLog.d("Novagram folders: remove kept " + failed.size + " id(s) the server refused: " + failed)
+                    val keep = kindToFilter(account).filterValues { it in failed }
+                    saveKindToFilter(account, keep)
+                }
+                NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
+                busy[account] = false
                 onDone()
                 return
             }
@@ -548,11 +582,18 @@ object AdminFolders {
             }
             val req = TLRPC.TL_messages_updateDialogFilter()
             req.id = id                      // no filter body = delete, the same call FilterCreateActivity makes
-            fragment.connectionsManager.sendRequest(req) { _, _ ->
+            fragment.connectionsManager.sendRequest(req) { _, error ->
                 org.telegram.messenger.AndroidUtilities.runOnUIThread {
-                    controller.removeFilter(filter)
-                    org.telegram.messenger.MessagesStorage.getInstance(account).deleteDialogFilter(filter)
-                    FolderIcons.setIconRes(id, 0)   // 0 is not in ICONS -> clears our override
+                    if (error == null) {
+                        controller.removeFilter(filter)
+                        org.telegram.messenger.MessagesStorage.getInstance(account).deleteDialogFilter(filter)
+                        FolderIcons.setIconRes(id, 0)   // 0 is not in ICONS -> clears our override
+                    } else {
+                        // Dropping it locally anyway was the bug: the folder is still on the account, comes
+                        // back with the next getDialogFilters, and by then we have forgotten it.
+                        failed.add(id)
+                        FileLog.d("Novagram folders: delete of filter " + id + " failed: " + error.text)
+                    }
                     step()
                 }
             }

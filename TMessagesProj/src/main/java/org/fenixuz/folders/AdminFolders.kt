@@ -232,40 +232,38 @@ object AdminFolders {
     }
 
     /**
-     * Every title this feature has ever given a folder OF THIS KIND, in every language it ships.
+     * Every title we could have given a folder OF THIS KIND, in every language the app ships -- each one
+     * carrying [MARKER].
      *
-     * Identity is the stored kind->id map; this is the recovery net for when that map is unavailable, and
-     * it has to be per-kind or a sweep would file the channels folder under groups. Two real cases need it:
-     * the titles were shortened once to fit Telegram's 12-character cap, and the user can switch the app
-     * language at any time -- in both, a folder we made no longer carries the title we would generate now.
-     * Matching only the current title is what produced a duplicate set of four.
+     * Identity is really the stored kind->id map; this is only the recovery net for when that map is
+     * unavailable (a reinstall, cleared app data, a bug in our own bookkeeping). It has to be per-kind or a
+     * sweep would file the channels folder under groups, and it has to cover all three languages because the
+     * user can switch language at any time and a folder we made then no longer carries the title we would
+     * generate now.
      *
-     * A server-side marker would be better, but the folder's `emoticon` field is not on
-     * MessagesController.DialogFilter and saveFilterToServer does not send it, so keeping one would mean
-     * patching upstream's model and its save path -- a debt that comes due at every re-base.
+     * **Every entry must carry the marker.** The list used to include the bare titles too, which quietly
+     * turned the net into a trap: a folder the user had named `Kanallarim`, `Guruhlarim`, `My channels` or
+     * `Мои каналы` -- ordinary names, and Telegram's 12-character cap pushes people towards exactly these --
+     * matched as one of ours. Enabling the feature ADOPTED it and replaced its contents; disabling DELETED it
+     * from the account, on every device the user is signed in on. The marker existed precisely to prevent
+     * that and was doing nothing, because nothing required it.
+     *
+     * The bare titles were there for folders created before the marker was introduced. Those exist only on
+     * the development phone -- this feature has never shipped -- so dropping them costs nobody anything.
      */
     private fun titlesFor(kind: Kind): Set<String> {
         val out = LinkedHashSet<String>()
         LanguageCode.getMyTitles(kind.titleCode)          // forces the table to initialize
         LanguageCode.titlesLanguages.getOrNull(kind.titleCode)?.let { t ->
             for (v in listOf(t.en, t.uz, t.ru)) {
-                out.add((MARKER + v).take(MAX_FOLDER_NAME))   // what we write now
-                out.add(v)                                    // and what we wrote before the marker
-                out.add(v.take(MAX_FOLDER_NAME))
+                // A missing translation would collapse to the bare marker, which would then match any folder
+                // the user happened to name "★". Skip it rather than widen the net.
+                if (v.isBlank()) continue
+                out.add((MARKER + v).take(MAX_FOLDER_NAME))
             }
         }
-        out.addAll(LEGACY_TITLES[kind] ?: emptyList())
-        out.remove("")
         return out
     }
-
-    /** Titles used before the 12-character clamp; folders created then still carry them. */
-    private val LEGACY_TITLES: Map<Kind, List<String>> = mapOf(
-        Kind.GROUP_OWNER to listOf("Mening guruhlarim", "My groups", "Мои группы"),
-        Kind.GROUP_ADMIN to listOf("Admin guruhlar", "Admin groups", "Группы-админ"),
-        Kind.CHANNEL_OWNER to listOf("Mening kanallarim", "My channels", "Мои каналы"),
-        Kind.CHANNEL_ADMIN to listOf("Admin kanallar", "Admin channels", "Каналы-админ")
-    )
 
     /** Ids of the folders WE created for [account]. Empty means the feature is off. */
     fun createdIds(account: Int): List<Int> = kindToFilter(account).values.toList()

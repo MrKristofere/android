@@ -68,6 +68,21 @@ object AdminFolders {
     private val lastSyncAt = LongArray(UserConfig.MAX_ACCOUNT_COUNT)
 
     /**
+     * The interval above drops a call rather than delaying it, so a rights change that happens to land
+     * inside the window would simply be lost until some later notification came along -- "usually works"
+     * rather than a guarantee. One trailing re-check per window closes that: at most one is outstanding per
+     * account, it is scheduled only when a call was actually dropped, and it carries nothing but the account
+     * index, so there is no Activity or Fragment for it to keep alive.
+     */
+    private val pendingCheck = BooleanArray(UserConfig.MAX_ACCOUNT_COUNT)
+    private val trailingCheck = Array(UserConfig.MAX_ACCOUNT_COUNT) { a ->
+        Runnable {
+            pendingCheck[a] = false
+            syncIfNeeded(a)
+        }
+    }
+
+    /**
      * One folder operation at a time per account. Every one of these is a CHAIN of server round-trips, and
      * they all read the account's current folder list to decide what to adopt, create or delete. Two chains
      * overlapping — the obvious way being a quick off-then-on — means the second one reads a list the first
@@ -241,11 +256,14 @@ object AdminFolders {
      * a creator too, and leaving that in would make "My groups" and "Admin groups" near-duplicates.
      */
     fun classify(account: Int): LinkedHashMap<Kind, MutableList<Long>> {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
         val buckets = LinkedHashMap<Kind, MutableList<Long>>()
         for (k in Kind.entries) buckets[k] = ArrayList()
 
         val controller = MessagesController.getInstance(account)
-        for (dialog in ArrayList(controller.getAllDialogs())) {
+        val all = ArrayList(controller.getAllDialogs())
+        val dialogCount = all.size
+        for (dialog in all) {
             val did = dialog?.id ?: continue
             if (!DialogObject.isChatDialog(did)) continue
             val chat: TLRPC.Chat = controller.getChat(-did) ?: continue
@@ -265,6 +283,13 @@ object AdminFolders {
                 else -> Kind.GROUP_ADMIN
             }
             buckets[kind]!!.add(did)
+        }
+        // This is the only part of the feature that walks the whole chat list, and it runs on the UI thread.
+        // Rather than assume it is cheap, say so out loud if it ever is not: one frame is ~16 ms, so anything
+        // at or past that is worth knowing about on a big account.
+        val tookMs = android.os.SystemClock.elapsedRealtime() - startedAt
+        if (tookMs >= 16) {
+            FileLog.d("Novagram folders: classify took " + tookMs + " ms over " + dialogCount + " dialogs -- move it off the UI thread if this is common")
         }
         return buckets
     }
@@ -446,7 +471,16 @@ object AdminFolders {
         // and gets created a SECOND time. That is exactly how one enable produced two of three.
         if (claimed(account)) return
         val now = System.currentTimeMillis()
-        if (now - lastSyncAt[account] < SYNC_MIN_INTERVAL_MS) return
+        if (now - lastSyncAt[account] < SYNC_MIN_INTERVAL_MS) {
+            // Come back when the window closes instead of dropping this outright. Guarded by a plain array
+            // read so the hot path stays cheap: updateInterfaces fires constantly and lands here most times.
+            if (!pendingCheck[account]) {
+                pendingCheck[account] = true
+                org.telegram.messenger.AndroidUtilities.runOnUIThread(
+                    trailingCheck[account], SYNC_MIN_INTERVAL_MS - (now - lastSyncAt[account]) + 50L)
+            }
+            return
+        }
         if (!isEnabled(account)) return
 
         val controller = MessagesController.getInstance(account)

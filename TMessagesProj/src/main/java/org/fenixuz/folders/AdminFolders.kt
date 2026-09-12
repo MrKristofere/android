@@ -48,6 +48,20 @@ object AdminFolders {
      */
     private const val MAX_FOLDER_NAME = 12
 
+    /**
+     * Prefix stamped on every folder this feature creates, and the thing that makes them recognisably OURS.
+     *
+     * Identity used to rest on the title text alone, which meant a folder the user happened to name
+     * "Kanallarim" could be adopted -- or swept away by a disable. A marker removes that: a title has to
+     * carry it AND match one of our texts. It is language-independent, it survives a rename of the wording,
+     * and unlike the folder's `emoticon` field it actually reaches the server, because saveFilterToServer
+     * sends the title and never sends emoticon.
+     *
+     * U+2605 is a BMP character, so it costs ONE UTF-16 unit of the 12-character budget, not two like an
+     * emoji outside the BMP would. Every localized title is sized to leave room for it.
+     */
+    private const val MARKER = "★"
+
     /** At most one auto-sync per this interval; a rights change does not need a faster reaction. */
     private const val SYNC_MIN_INTERVAL_MS = 10_000L
     private val lastSyncAt = LongArray(UserConfig.MAX_ACCOUNT_COUNT)
@@ -62,7 +76,7 @@ object AdminFolders {
         CHANNEL_OWNER(395, R.drawable.msg_channel),
         CHANNEL_ADMIN(396, R.drawable.msg_folders_channels);
 
-        val title: String get() = LanguageCode.getMyTitles(titleCode).take(MAX_FOLDER_NAME)
+        val title: String get() = (MARKER + LanguageCode.getMyTitles(titleCode)).take(MAX_FOLDER_NAME)
     }
 
     /** What a create/refresh actually managed to do, so the caller can tell the user the truth. */
@@ -167,8 +181,9 @@ object AdminFolders {
         LanguageCode.getMyTitles(kind.titleCode)          // forces the table to initialize
         LanguageCode.titlesLanguages.getOrNull(kind.titleCode)?.let { t ->
             for (v in listOf(t.en, t.uz, t.ru)) {
-                out.add(v)
-                out.add(v.take(MAX_FOLDER_NAME))          // what actually reached the server
+                out.add((MARKER + v).take(MAX_FOLDER_NAME))   // what we write now
+                out.add(v)                                    // and what we wrote before the marker
+                out.add(v.take(MAX_FOLDER_NAME))
             }
         }
         out.addAll(LEGACY_TITLES[kind] ?: emptyList())

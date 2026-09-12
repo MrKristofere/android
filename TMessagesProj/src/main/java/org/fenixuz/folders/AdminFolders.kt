@@ -87,7 +87,7 @@ object AdminFolders {
         busy[account] && System.currentTimeMillis() - busyAt[account] < BUSY_STALE_MS
 
     private fun claim(account: Int) {
-        claim(account)
+        busy[account] = true
         busyAt[account] = System.currentTimeMillis()
     }
 

@@ -74,9 +74,25 @@ object AdminFolders {
      * is halfway through changing, and duplicates fall straight out of that.
      */
     private val busy = BooleanArray(UserConfig.MAX_ACCOUNT_COUNT)
+    private val busyAt = LongArray(UserConfig.MAX_ACCOUNT_COUNT)
+
+    /**
+     * A chain releases the flag when it ends, but it ends on a network callback -- and a callback that
+     * never arrives would wedge the feature for the rest of the process. Treating an old claim as stale
+     * removes that whole class of failure for the price of one comparison.
+     */
+    private const val BUSY_STALE_MS = 60_000L
+
+    private fun claimed(account: Int): Boolean =
+        busy[account] && System.currentTimeMillis() - busyAt[account] < BUSY_STALE_MS
+
+    private fun claim(account: Int) {
+        claim(account)
+        busyAt[account] = System.currentTimeMillis()
+    }
 
     @JvmStatic
-    fun isBusy(account: Int): Boolean = account in busy.indices && busy[account]
+    fun isBusy(account: Int): Boolean = account in busy.indices && claimed(account)
 
     /** Owner of the folders we recorded, so state cannot survive a logout into a different account. */
     private const val KEY_UID_PREFIX = "admin_folder_uid_"
@@ -279,8 +295,8 @@ object AdminFolders {
      * this runs from a screen and never from a background task.
      */
     fun create(fragment: BaseFragment, account: Int, onDone: (Result) -> Unit) {
-        if (account !in busy.indices || busy[account]) return
-        busy[account] = true
+        if (account !in busy.indices || claimed(account)) return
+        claim(account)
         val done: (Result) -> Unit = { r -> busy[account] = false; onDone(r) }
         val buckets = classify(account).filterValues { it.isNotEmpty() }
         if (buckets.isEmpty()) {
@@ -417,6 +433,11 @@ object AdminFolders {
         // Order matters: this is called from updateInterfaces, which fires constantly. The time check is a
         // subtraction; isEnabled() reads a preference and parses it into a map. Cheapest guard first.
         if (account < 0 || account >= lastSyncAt.size) return
+        // Never run alongside create/remove/refresh. Adding a folder makes the app post
+        // updateInterfaces, which lands straight back here -- and mid-create the kind->id map is
+        // filled in only as each folder lands, so a kind still in flight looks like "no folder yet"
+        // and gets created a SECOND time. That is exactly how one enable produced two of three.
+        if (claimed(account)) return
         val now = System.currentTimeMillis()
         if (now - lastSyncAt[account] < SYNC_MIN_INTERVAL_MS) return
         if (!isEnabled(account)) return
@@ -461,6 +482,9 @@ object AdminFolders {
 
         val fragment = org.telegram.ui.LaunchActivity.getLastFragment() ?: return
         if (fragment.parentActivity == null) return
+        // Claim only here: every early return above must leave the flag DOWN, or one skipped
+        // sync would wedge create, remove and every later sync for the rest of the process.
+        claim(account)
 
         val queue = ArrayDeque<Pair<Kind, Boolean>>()               // kind, isNew
         for (j in jobs) queue.add(j.first to false)
@@ -471,10 +495,11 @@ object AdminFolders {
         fun step() {
             val next = queue.removeFirstOrNull()
             if (next == null) {
+                busy[account] = false
                 NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
                 return
             }
-            if (fragment.parentActivity == null) return
+            if (fragment.parentActivity == null) { busy[account] = false; return }
             val (kind, isNew) = next
 
             val filter: MessagesController.DialogFilter
@@ -545,8 +570,8 @@ object AdminFolders {
      * the user named themselves is unlikely, and this only ever runs from an explicit, confirmed "remove".
      */
     fun remove(fragment: BaseFragment, account: Int, onDone: () -> Unit) {
-        if (account !in busy.indices || busy[account]) return
-        busy[account] = true
+        if (account !in busy.indices || claimed(account)) return
+        claim(account)
         val controller = MessagesController.getInstance(account)
         val ids = LinkedHashSet(createdIds(account))
         val allKnown = Kind.entries.flatMap { titlesFor(it) }.toSet()

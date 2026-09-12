@@ -399,7 +399,6 @@ object AdminFolders {
                 FileLog.d("Novagram folders: " + kind.name + " computed an EMPTY peer list -- skipping")
                 return step()
             }
-            FileLog.d("Novagram folders: sending " + kind.name + " id=" + filter.id + " creating=" + creating + " peers=" + peers.size + " resolvable=" + peers.count { d -> MessagesController.getInstance(account).getChat(-d) != null } + " sample=" + peers.take(3))
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 filter.alwaysShow, filter.neverShow, filter.pinnedDialogs,
@@ -569,7 +568,6 @@ object AdminFolders {
                 FileLog.d("Novagram folders: " + kind.name + " computed an EMPTY peer list -- skipping")
                 return step()
             }
-            FileLog.d("Novagram folders: sending " + kind.name + " id=" + filter.id + " creating=" + creating + " peers=" + peers.size + " resolvable=" + peers.count { d -> MessagesController.getInstance(account).getChat(-d) != null } + " sample=" + peers.take(3))
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 peers, filter.neverShow, filter.pinnedDialogs,

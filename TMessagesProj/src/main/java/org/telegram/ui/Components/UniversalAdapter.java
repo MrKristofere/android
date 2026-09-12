@@ -741,6 +741,10 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
                 NotificationsCheckCell checkCell1 = (NotificationsCheckCell) holder.itemView;
                 final boolean multiline = item.subtext != null && item.subtext.toString().contains("\n");
                 checkCell1.setTextAndValueAndCheck(item.text, item.subtext, item.checked, 0, multiline, divider);
+                // Novagram: isEnabled() below already refuses the click, but NotificationsCheckCell has no
+                // disabled look of its own, so a blocked row was indistinguishable from a dead one. Default
+                // enabled == true keeps every existing caller at alpha 1.
+                checkCell1.setAlpha(item.enabled ? 1f : .5f);
                 break;
             case VIEW_TYPE_ICON_TEXT_CHECK:
                 // TODO: image

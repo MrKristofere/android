@@ -356,14 +356,21 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
             UItem.asButtonCheck(HIDE_TABS, LanguageCode.getMyTitles(260), LanguageCode.getMyTitles(261))
                 .setChecked(HideTabs.isEnabled())
         )
+        // Every one of these operations is a chain of server round-trips, and AdminFolders refuses a second
+        // one while the first is running -- that refusal is what stops a quick off-then-on from producing
+        // duplicate folders. Saying so in the UI is the missing half: a row that ignores a tap without
+        // looking any different reads as a broken button, not as "wait a second".
+        val foldersBusy = AdminFolders.isBusy(currentAccount)
         items.add(
             UItem.asButtonCheck(ADMIN_FOLDERS, LanguageCode.getMyTitles(391), LanguageCode.getMyTitles(392))
                 .setChecked(AdminFolders.isEnabled(currentAccount))
+                .setEnabled(!foldersBusy)
         )
-        // Refresh only exists once the folders do. They are a snapshot of the rights the user held when
-        // they were built, so this is the way back to accurate after a promotion or demotion.
+        // Refresh only exists once the folders do. Auto-sync keeps them current on its own, but it applies a
+        // delta and so preserves chats the user added or removed by hand; this is the only way to say
+        // "rebuild from my rights" and undo those edits, or to bring back a folder deleted elsewhere.
         if (AdminFolders.isEnabled(currentAccount)) {
-            items.add(UItem.asButton(ADMIN_FOLDERS_REFRESH, LanguageCode.getMyTitles(398)))
+            items.add(UItem.asButton(ADMIN_FOLDERS_REFRESH, LanguageCode.getMyTitles(398)).setEnabled(!foldersBusy))
         }
         items.add(UItem.asShadow(null))
 
@@ -531,6 +538,7 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
                         .setMessage(LanguageCode.getMyTitles(397))
                         .setPositiveButton(LanguageCode.getMyTitles(323)) { _, _ ->
                             AdminFolders.create(this, currentAccount) { result -> reportAdminFolders(result, item, view) }
+                            listView?.adapter?.update(true)
                         }
                         .setNegativeButton(LanguageCode.getMyTitles(80), null)
                         .show()
@@ -544,6 +552,7 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
                                 (view as? NotificationsCheckCell)?.setChecked(false)
                                 listView?.adapter?.update(true)
                             }
+                            listView?.adapter?.update(true)
                         }
                         .setNegativeButton(LanguageCode.getMyTitles(80), null)
                         .show()
@@ -551,6 +560,7 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
             }
             ADMIN_FOLDERS_REFRESH -> {
                 AdminFolders.refresh(this, currentAccount) { result -> reportAdminFolders(result, null, null) }
+                listView?.adapter?.update(true)
             }
             AUTO_ACCEPT_JOIN -> {
                 AutoAcceptJoin.toggle()
@@ -681,6 +691,10 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
 
     override fun onResume() {
         super.onResume()
+        // A folder operation can also be started by the automatic sync while this screen is open, so the
+        // rows have to follow the flag rather than only the taps made here. Cleared in onPause, so the
+        // reference cannot outlive the fragment.
+        AdminFolders.setBusyListener(Runnable { listView?.adapter?.update(true) })
         // Reflect secret-chat / fingerprint state after returning from a passcode screen.
         if (listView != null) {
             listView.adapter.update(true)
@@ -785,6 +799,7 @@ class FenixSettings @JvmOverloads constructor(private val targetUrl: String? = n
         super.onPause()
         // Don't let a flash keep running (touching views) after we leave the screen.
         flashAnimator?.cancel()
+        AdminFolders.setBusyListener(null)
     }
 
     /**

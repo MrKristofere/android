@@ -104,10 +104,35 @@ object AdminFolders {
     private fun claim(account: Int) {
         busy[account] = true
         busyAt[account] = System.currentTimeMillis()
+        notifyBusy()
+    }
+
+    private fun release(account: Int) {
+        busy[account] = false
+        notifyBusy()
     }
 
     @JvmStatic
     fun isBusy(account: Int): Boolean = account in busy.indices && claimed(account)
+
+    /**
+     * Lets an open settings screen grey its controls out for as long as an operation is running.
+     *
+     * Taps were not lost before this -- [claimed] refuses them, which is what stops a quick off-then-on from
+     * racing two chains against each other -- but a control that silently ignores a tap reads as broken. One
+     * listener is enough: only FenixSettings shows these rows, and it clears the reference when it pauses, so
+     * nothing here can outlive the screen.
+     */
+    private var busyListener: Runnable? = null
+
+    @JvmStatic
+    fun setBusyListener(listener: Runnable?) {
+        busyListener = listener
+    }
+
+    private fun notifyBusy() {
+        busyListener?.let { org.telegram.messenger.AndroidUtilities.runOnUIThread(it) }
+    }
 
     /** Owner of the folders we recorded, so state cannot survive a logout into a different account. */
     private const val KEY_UID_PREFIX = "admin_folder_uid_"
@@ -304,6 +329,28 @@ object AdminFolders {
         return if (UserConfig.getInstance(account).isPremium) c.dialogFiltersChatsLimitPremium else c.dialogFiltersChatsLimitDefault
     }
 
+    /**
+     * Keep the two invariants Telegram's own filter editor keeps whenever the include list changes: no chat
+     * may sit in both lists, and a pinned dialog must still be a member (FilterCreateActivity does exactly
+     * this in its include-picker delegate).
+     *
+     * It matters here because we edit filters IN PLACE and therefore inherit whatever exclusions and pins the
+     * user set inside our folders. A chat left in both lists, or pinned in a folder it is no longer part of,
+     * is a folder the client and the server quietly disagree about.
+     */
+    private fun alignAuxLists(filter: MessagesController.DialogFilter, peers: List<Long>) {
+        val members = HashSet(peers)
+        filter.neverShow?.removeAll(members)
+        val pinned = filter.pinnedDialogs ?: return
+        val drop = ArrayList<Long>()
+        for (i in 0 until pinned.size()) {
+            val did = pinned.keyAt(i)
+            if (DialogObject.isEncryptedDialog(did)) continue     // secret chats are pinned independently
+            if (did !in members) drop.add(did)
+        }
+        for (did in drop) pinned.delete(did)
+    }
+
     /** First id not already taken by one of the user's folders — the allocation Telegram itself uses. */
     private fun freeFilterId(account: Int, alsoTaken: Set<Int>): Int {
         val byId = MessagesController.getInstance(account).dialogFiltersById
@@ -322,7 +369,7 @@ object AdminFolders {
     fun create(fragment: BaseFragment, account: Int, onDone: (Result) -> Unit) {
         if (account !in busy.indices || claimed(account)) return
         claim(account)
-        val done: (Result) -> Unit = { r -> busy[account] = false; onDone(r) }
+        val done: (Result) -> Unit = { r -> release(account); onDone(r) }
         val buckets = classify(account).filterValues { it.isNotEmpty() }
         if (buckets.isEmpty()) {
             done(Result(0, 0, LinkedHashMap(), LanguageCode.getMyTitles(399)))
@@ -424,6 +471,7 @@ object AdminFolders {
                 FileLog.d("Novagram folders: " + kind.name + " computed an EMPTY peer list -- skipping")
                 return step()
             }
+            alignAuxLists(filter, peers)
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 filter.alwaysShow, filter.neverShow, filter.pinnedDialogs,
@@ -435,19 +483,188 @@ object AdminFolders {
     }
 
     /**
-     * Recompute and rewrite the folders we own. Same snapshot rules as [create]; folders the user has since
-     * deleted by hand are dropped from our list rather than recreated, because recreating something the
-     * user deliberately removed is worse than leaving it gone.
+     * Put the folders back to exactly what the user's rights say they should be.
+     *
+     * This is the deliberate counterpart to [syncIfNeeded]: the sync applies a DELTA and therefore preserves
+     * chats the user added or removed by hand, while Refresh is the way to say "forget my edits, rebuild from
+     * my rights". Nothing else offers that, which is why the row is worth keeping.
+     *
+     * It rewrites each folder IN PLACE. The first version deleted all four and created them again, which
+     * worked but was the wrong shape for a repair button: the folders came back at the end of the tab strip
+     * with new ids, the user's own pinned chats and exclusions inside them were lost, and a chain that broke
+     * after the deletes left the account with no folders at all. Editing the existing filter keeps its
+     * position, its id, its pinned dialogs and its exclusions, and the worst a broken chain can now do is
+     * leave one folder un-updated.
+     *
+     * Three cases per bucket:
+     *  - folder exists and the bucket has chats -> overwrite its member list, title, colour and icon;
+     *  - folder exists and the bucket is now EMPTY -> delete it, because [create] would not have made an
+     *    empty one either and Telegram refuses a filter with no members anyway;
+     *  - no folder and the bucket has chats -> adopt a stray of ours, or create one if there is room.
      */
     fun refresh(fragment: BaseFragment, account: Int, onDone: (Result) -> Unit) {
-        val ours = createdIds(account)
-        if (ours.isEmpty()) {
+        if (account !in busy.indices || claimed(account)) return
+        val map = kindToFilter(account)
+        if (map.isEmpty()) {
+            // Nothing of ours on record: this is a first build, not a repair.
             create(fragment, account, onDone)
             return
         }
-        remove(fragment, account) {
-            create(fragment, account, onDone)
+        val controller = MessagesController.getInstance(account)
+        // Refreshing off a half-loaded chat list would read as "you administer nothing" and delete all four.
+        // The same guard syncIfNeeded relies on, restated here because this path is reachable from the UI at
+        // any moment, including a few hundred milliseconds after a cold start.
+        if (!controller.dialogFiltersLoaded || !controller.dialogsLoaded || controller.getAllDialogs().isEmpty()) {
+            onDone(Result(0, 0, LinkedHashMap(), LanguageCode.getMyTitles(399)))
+            return
         }
+        claim(account)
+        val done: (Result) -> Unit = { r -> release(account); onDone(r) }
+
+        val current = classify(account)
+        val perFolder = chatsPerFolderLimit(account)
+        val truncated = LinkedHashMap<String, Int>()
+        val taken = HashSet<Int>()
+        var created = 0
+        var filed = 0
+
+        // UPDATE / DELETE / CREATE, all decided before a single request goes out, so the chain cannot change
+        // its mind halfway through on a folder list that its own writes are mutating.
+        val updates = ArrayList<Kind>()
+        val deletes = ArrayList<Pair<Kind, Int>>()
+        val creates = ArrayList<Kind>()
+        for (kind in Kind.entries) {
+            val has = (current[kind] ?: emptyList<Long>()).isNotEmpty()
+            val existing = map[kind]?.let { controller.dialogFiltersById.get(it) }
+            when {
+                existing != null && has -> updates.add(kind)
+                existing != null -> deletes.add(kind to existing.id)
+                // Tracked but the filter is gone: deleted by hand, or on another device. Refresh is an
+                // explicit "rebuild from my rights", so unlike syncIfNeeded this DOES bring it back.
+                has -> creates.add(kind)
+                else -> if (map.containsKey(kind)) {
+                    val m = kindToFilter(account); m.remove(kind); saveKindToFilter(account, m)
+                    val sp = snapshot(account); sp[kind] = LinkedHashSet(); saveSnapshot(account, sp)
+                }
+            }
+        }
+
+        // Charge the folder limit only for a bucket that would need a genuinely NEW slot; one we can adopt
+        // costs nothing. Over the limit we skip the creates and still do the updates -- a partial repair
+        // beats refusing to repair anything.
+        var room = folderLimit(account) - controller.dialogFilters.size
+        val creatable = ArrayList<Kind>()
+        for (kind in creates) {
+            val known = titlesFor(kind)
+            val tracked = createdIds(account).toSet()
+            val adoptable = controller.dialogFilters.any { it != null && !it.isDefault && it.name in known && it.id !in tracked }
+            if (adoptable) { creatable.add(kind); continue }
+            if (room > 0) { creatable.add(kind); room-- }
+        }
+        val skipped = creates.size - creatable.size
+
+        FileLog.d("Novagram folders: refresh -- update " + updates.map { it.name }
+                + ", delete " + deletes.map { it.first.name } + ", create " + creatable.map { it.name }
+                + (if (skipped > 0) ", SKIPPED " + skipped + " (no folder slots left)" else ""))
+
+        val queue = ArrayDeque<Pair<Kind, Boolean>>()          // kind, isNew
+        for (k in updates) queue.add(k to false)
+        for (k in creatable) queue.add(k to true)
+
+        fun finish() {
+            NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
+            val blocked = if (skipped > 0) {
+                LanguageCode.getMyTitles(400)
+                    .replace("%1\$d", folderLimit(account).toString())
+                    .replace("%2\$d", controller.dialogFilters.size.toString())
+            } else null
+            done(Result(created, filed, truncated, blocked))
+        }
+
+        // Deletions run LAST. If the chain dies partway the user is left with one stale folder, which another
+        // press of Refresh fixes -- whereas dying after the deletes and before the writes would leave them
+        // with nothing, which is the failure the old delete-then-recreate shape had built in.
+        fun sweep() {
+            val gone = ArrayDeque(deletes)
+            fun next() {
+                val d = gone.removeFirstOrNull()
+                if (d == null) { finish(); return }
+                deleteFilterOnServer(fragment, account, d.second) { ok ->
+                    if (ok) {
+                        val m = kindToFilter(account); m.remove(d.first); saveKindToFilter(account, m)
+                        val sp = snapshot(account); sp[d.first] = LinkedHashSet(); saveSnapshot(account, sp)
+                    }
+                    next()
+                }
+            }
+            next()
+        }
+
+        fun step() {
+            val next = queue.removeFirstOrNull()
+            if (next == null) { sweep(); return }
+            // saveFilterToServer returns WITHOUT calling onFinish once the fragment has lost its activity,
+            // which would strand the queue and hold the busy flag until it went stale. Stop cleanly instead;
+            // everything written so far is already persisted.
+            if (fragment.parentActivity == null) { finish(); return }
+            val (kind, isNew) = next
+
+            val all = current[kind] ?: emptyList<Long>()
+            val peers = if (all.size > perFolder) {
+                truncated[kind.title] = perFolder
+                ArrayList(all.subList(0, perFolder))
+            } else {
+                ArrayList(all)
+            }
+            if (peers.isEmpty()) {
+                // Unreachable -- an empty bucket became a delete above -- but a filter with no members and no
+                // auto-include flags is rejected as FILTER_INCLUDE_EMPTY, so never send one.
+                return step()
+            }
+
+            val filter: MessagesController.DialogFilter
+            val creating: Boolean
+            if (isNew) {
+                val tracked = createdIds(account).toSet()
+                val known = titlesFor(kind)
+                val adopted = controller.dialogFilters
+                    .firstOrNull { it != null && !it.isDefault && it.name in known && it.id !in tracked && it.id !in taken }
+                creating = adopted == null
+                filter = adopted ?: MessagesController.DialogFilter()
+                if (creating) {
+                    filter.id = freeFilterId(account, taken)
+                    filter.neverShow = ArrayList()
+                    filter.pinnedDialogs = LongSparseIntArray()
+                }
+                created++
+            } else {
+                creating = false
+                // Non-null by construction: this kind is in `updates` only because the lookup succeeded, and
+                // nothing between there and here removes a filter.
+                filter = controller.dialogFiltersById.get(map[kind] ?: -1) ?: return step()
+            }
+            taken.add(filter.id)
+            // Rewriting the title on an update is not cosmetic: it repairs a folder still carrying a
+            // pre-marker or wrong-language name, so a later enable/disable still recognises it as ours.
+            filter.name = kind.title
+            filter.flags = 0                     // no auto-include: membership is exactly [alwaysShow]
+            filter.color = kind.ordinal % 8
+            filter.alwaysShow = peers
+            filed += peers.size
+
+            val m = kindToFilter(account); m[kind] = filter.id; saveKindToFilter(account, m)
+            val sp = snapshot(account); sp[kind] = LinkedHashSet(all); saveSnapshot(account, sp)
+            FolderIcons.setIconRes(filter.id, kind.iconRes)
+
+            alignAuxLists(filter, peers)
+            FilterCreateActivity.saveFilterToServer(
+                filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
+                filter.alwaysShow, filter.neverShow, filter.pinnedDialogs,
+                /* creatingNew */ creating, /* atBegin */ false, /* hasUserChanged */ true,
+                /* resetUnreadCounter */ false, /* progress */ false, fragment
+            ) { step() }   // strictly sequential: parallel saves race on the server's filter order
+        }
+        step()
     }
 
     /**
@@ -541,11 +758,11 @@ object AdminFolders {
         fun step() {
             val next = queue.removeFirstOrNull()
             if (next == null) {
-                busy[account] = false
+                release(account)
                 NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
                 return
             }
-            if (fragment.parentActivity == null) { busy[account] = false; return }
+            if (fragment.parentActivity == null) { release(account); return }
             val (kind, isNew) = next
 
             val filter: MessagesController.DialogFilter
@@ -602,6 +819,7 @@ object AdminFolders {
                 FileLog.d("Novagram folders: " + kind.name + " computed an EMPTY peer list -- skipping")
                 return step()
             }
+            alignAuxLists(filter, peers)
             FilterCreateActivity.saveFilterToServer(
                 filter, filter.flags, filter.name, filter.entities, filter.title_noanimate, filter.color,
                 peers, filter.neverShow, filter.pinnedDialogs,
@@ -610,6 +828,38 @@ object AdminFolders {
             ) { step() }
         }
         step()
+    }
+
+    /**
+     * Delete one folder from the account and from this device. Shared by [remove] and [refresh] so there is a
+     * single place that knows a body-less TL_messages_updateDialogFilter means "delete" -- the same call
+     * FilterCreateActivity makes -- and a single place that remembers to clear our icon override.
+     *
+     * [onResult] is always invoked, on the UI thread, with false only when the SERVER refused: a filter that
+     * is already gone is a success, because the caller wanted it gone.
+     */
+    private fun deleteFilterOnServer(fragment: BaseFragment, account: Int, id: Int, onResult: (Boolean) -> Unit) {
+        val controller = MessagesController.getInstance(account)
+        val filter = controller.dialogFiltersById.get(id)
+        if (filter == null) {
+            onResult(true)   // already gone (deleted by hand, or on another device) -- nothing to undo
+            return
+        }
+        val req = TLRPC.TL_messages_updateDialogFilter()
+        req.id = id
+        fragment.connectionsManager.sendRequest(req) { _, error ->
+            org.telegram.messenger.AndroidUtilities.runOnUIThread {
+                if (error == null) {
+                    controller.removeFilter(filter)
+                    org.telegram.messenger.MessagesStorage.getInstance(account).deleteDialogFilter(filter)
+                    FolderIcons.setIconRes(id, 0)   // 0 is not in ICONS -> clears our override
+                    onResult(true)
+                } else {
+                    FileLog.d("Novagram folders: delete of filter " + id + " failed: " + error.text)
+                    onResult(false)
+                }
+            }
+        }
     }
 
     /**
@@ -649,31 +899,15 @@ object AdminFolders {
                     saveKindToFilter(account, keep)
                 }
                 NotificationCenter.getInstance(account).postNotificationName(NotificationCenter.dialogFiltersUpdated)
-                busy[account] = false
+                release(account)
                 onDone()
                 return
             }
-            val filter = controller.dialogFiltersById.get(id)
-            if (filter == null) {
-                step()   // already gone (deleted by hand, or on another device) — nothing to undo
-                return
-            }
-            val req = TLRPC.TL_messages_updateDialogFilter()
-            req.id = id                      // no filter body = delete, the same call FilterCreateActivity makes
-            fragment.connectionsManager.sendRequest(req) { _, error ->
-                org.telegram.messenger.AndroidUtilities.runOnUIThread {
-                    if (error == null) {
-                        controller.removeFilter(filter)
-                        org.telegram.messenger.MessagesStorage.getInstance(account).deleteDialogFilter(filter)
-                        FolderIcons.setIconRes(id, 0)   // 0 is not in ICONS -> clears our override
-                    } else {
-                        // Dropping it locally anyway was the bug: the folder is still on the account, comes
-                        // back with the next getDialogFilters, and by then we have forgotten it.
-                        failed.add(id)
-                        FileLog.d("Novagram folders: delete of filter " + id + " failed: " + error.text)
-                    }
-                    step()
-                }
+            deleteFilterOnServer(fragment, account, id) { ok ->
+                // Dropping it locally on a failure was the bug: the folder is still on the account, comes
+                // back with the next getDialogFilters, and by then we have forgotten it.
+                if (!ok) failed.add(id)
+                step()
             }
         }
         step()

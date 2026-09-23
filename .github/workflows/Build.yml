@@ -6,7 +6,7 @@ on:
       branch:
         description: "Branch name"
         type: string
-        default: master
+        default: main
       app-type:
         description: "App type"
         type: choice
@@ -39,6 +39,7 @@ jobs:
     steps:
     
       - name: Free up disk space
+        if: false
         uses: jlumbroso/free-disk-space@main
         with:
           preinstalled-runtimes: true

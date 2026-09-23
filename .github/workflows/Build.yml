@@ -120,7 +120,7 @@ jobs:
       - name: Fill BuildVars
         if: ${{ inputs.appidhash }}
         run: |
-          sed -i -E 's/public static int APP_ID = [0-9]+;/public static int APP_ID = 6;/' \
+          sed -i -E 's/public static int APP_ID = [^"]*;/public static int APP_ID = 6;/' \
             TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
 
           sed -i -E 's/public static String APP_HASH = "[^"]*";/public static String APP_HASH = "eb06d4abfb49dc3eeb1aeb98ae0f581e";/' \
